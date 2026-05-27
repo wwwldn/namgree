@@ -1,0 +1,30 @@
+{
+  "systems": [
+    {
+      "id": "1",
+      "name": "ERP SYSTEM",
+      "external_forms": [
+        {"title": "Yêu cầu mã SP mới", "url": "link_form_1"},
+        {"title": "Yêu cầu phân quyền", "url": "link_form_2"}
+      ],
+      "internal_management": {
+        "log_admin": "link_logs_admin_erp",
+        "log_server": "link_server_erp",
+        "task_vendor": "https://docs.google.com/spreadsheets/d/1weaOkeNgZFRNXAoPcsnsnCnaZ1I9S8IICxhkZKLO-r0/"
+      }
+    },
+    {
+      "id": "2",
+      "name": "BAOHANH-SYSTEM",
+      "external_forms": [
+        {"title": "Form cập nhật Model", "url": "link_form_model"},
+        {"title": "Form yêu cầu kích hoạt", "url": "link_form_active"}
+      ],
+      "internal_management": {
+        "log_admin": "https://docs.google.com/spreadsheets/d/1weaOkeNgZFRNXAoPcsnsnCnaZ1I9S8IICxhkZKLO-r0/",
+        "log_server": "https://docs.google.com/spreadsheets/d/1qJ-Cm9_m0cy4c7q_2ZRhJY0DDiN0n7E7RsA0ICb0xkc/",
+        "task_vendor": "link_task_bsc"
+      }
+    }
+  ]
+}

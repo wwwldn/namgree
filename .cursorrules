@@ -1,0 +1,8 @@
+# NamLeGree Project Rules
+
+- Luôn ưu tiên hiển thị brand "leducnam.com" hoặc "Lê Đức Nam" ở footer hoặc sidebar.
+- Các đường dẫn file phải bắt đầu từ gốc: `D:\NAMLE\GIT\Antigravity\namlegree`.
+- Khi viết module xử lý Excel cho công ty Gree, hãy sử dụng thư viện `pandas`.
+- Giao diện (UI) sử dụng Streamlit: ưu tiên `st.sidebar` để điều hướng và `st.columns` để chia layout.
+- Ngôn ngữ giao diện: Tiếng Việt. Ngôn ngữ code: Tiếng Anh.
+- Luôn kiểm tra sự tồn tại của file trong `data/` và `assets/` trước khi đọc để tránh crash app.
