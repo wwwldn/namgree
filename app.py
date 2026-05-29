@@ -61,7 +61,7 @@ def gen_ticket_id():
 
 FORM_CONFIGS = [
     {
-        "label": "Form 1: Phân loại chi phí bảo hành",
+        "label": "Form 1: Khai báo Model phân loại chi phí bảo hành",
         "type": "Khai_Bao_Model_Bao_Hanh",
         "title": "Danh sách Model đã cập nhật hệ thống",
         "columns": [
@@ -77,7 +77,7 @@ FORM_CONFIGS = [
         ],
     },
     {
-        "label": "Form 2: Khai báo mã linh kiện",
+        "label": "Form 2: Khai báo mã linh kiện mới",
         "type": "Khai_Bao_Ma_Linh_Kien",
         "title": "Danh sách mã linh kiện đã cập nhật hệ thống",
         "columns": [
@@ -127,7 +127,7 @@ FORM_CONFIGS = [
         ],
     },
     {
-        "label": "Form 5: Đăng ký tài khoản user nội bộ",
+        "label": "Form 5: Đăng ký tài khoản user nội bộ Gree",
         "type": "Dang_Ky_Tai_Khoan_User_Noi_Bo",
         "title": "Danh sách tài khoản user nội bộ đăng ký mới",
         "columns": [
@@ -147,7 +147,7 @@ FORM_CONFIGS = [
         ],
     },
     {
-        "label": "Form 6: Khai báo Model cho Hồ sơ máy",
+        "label": "Form 6: Khai báo Model cho Import Hồ sơ máy",
         "type": "Khai_Bao_Model_Ho_So_May",
         "title": "Danh sách Model hồ sơ máy đã cập nhật hệ thống",
         "columns": [
@@ -162,7 +162,7 @@ FORM_CONFIGS = [
         ],
     },
     {
-        "label": "Form 7: Admin Web ghi nhận nội dung hỗ trợ",
+        "label": "Form 7: Admin ghi nhận nội dung hỗ trợ (Admin Logs)",
         "type": "Admin_Web_Noted_Log_Ho_Tro",
         "title": "Danh sách log hỗ trợ Admin Web",
         "columns": [
