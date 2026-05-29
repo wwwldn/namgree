@@ -369,13 +369,14 @@ elif page == "🛡️ Hệ thống Bảo hành":
 
     if selected_config and st.session_state.get("show_create_ticket", False):
         form_choice = selected_scope
+        form_choice_type = selected_form_type
         with st.container(border=True):
             st.subheader(f"➕ Tạo Ticket mới - {selected_scope}")
         
-            t_user = st.text_input("Người yêu cầu", placeholder="Ví dụ: Phượng CAC")
+            t_user = st.text_input("Người yêu cầu", placeholder="Ví dụ: Phượng BH RAC")
         
             form_data = {}
-            if form_choice == "Form 1: Phân loại chi phí bảo hành":
+            if form_choice_type == "Khai_Bao_Model_Bao_Hanh":
                 left_col, right_col = st.columns(2)
                 with left_col:
                     form_data['model_name'] = st.text_input("Tên Model", placeholder="Ví dụ: GWC12PB-K3D0P4")
@@ -401,12 +402,12 @@ elif page == "🛡️ Hệ thống Bảo hành":
                         "10Hp - 24Hp", "10Hp - 60Hp"
                     ])
                     form_data['note'] = st.text_area("Ghi chú", height=96, placeholder="Thông tin bổ sung nếu có")
-            elif form_choice == "Form 2: Khai báo mã linh kiện":
+            elif form_choice_type == "Khai_Bao_Ma_Linh_Kien":
                 form_data['part_code'] = st.text_input("Mã linh kiện")
                 form_data['part_name_en'] = st.text_input("Tên linh kiện (EN)")
                 form_data['part_name_vi'] = st.text_input("Tên linh kiện (VI)")
                 form_data['description'] = st.text_area("Mô tả")
-            elif form_choice == "Form 3: Yêu cầu điều chỉnh tồn kho hệ thống":
+            elif form_choice_type == "Yeu_Cau_Dieu_Chinh_Ton_Kho":
                 left_col, right_col = st.columns(2)
                 with left_col:
                     form_data['warehouse'] = st.text_input("Kho/Trạm", placeholder="Ví dụ: Hưng Yên - RAC")
@@ -421,7 +422,7 @@ elif page == "🛡️ Hệ thống Bảo hành":
                         height=140,
                         placeholder="Mô tả lệch tồn, hướng xử lý, lưu ý cho kho/trạm",
                     )
-            elif form_choice == "Form 4: Đăng ký thông tin trạm bảo hành mới":
+            elif form_choice_type == "Dang_Ky_Tram_Bao_Hanh_Moi":
                 left_col, right_col = st.columns(2)
                 with left_col:
                     st.markdown("**Thông tin công ty**")
@@ -463,7 +464,7 @@ elif page == "🛡️ Hệ thống Bảo hành":
                     "technicians": parse_pipe_rows(technicians_raw, ["name", "phone", "username"]),
                     "associated_warehouses": parse_pipe_rows(warehouses_raw, ["type", "name", "email"]),
                 }
-            elif form_choice == "Form 5: Đăng ký tài khoản user nội bộ":
+            elif form_choice_type == "Dang_Ky_Tai_Khoan_User_Noi_Bo":
                 left_col, right_col = st.columns(2)
                 with left_col:
                     form_data['full_name'] = st.text_input("Họ tên", placeholder="Ví dụ: Võ Thanh Tùng")
@@ -496,12 +497,12 @@ elif page == "🛡️ Hệ thống Bảo hành":
                         "password": test_password,
                         "test_link": test_link,
                     }
-            elif form_choice == "Form 6: Khai báo Model cho Hồ sơ máy":
+            elif form_choice_type == "Khai_Bao_Model_Ho_So_May":
                 form_data['model_name'] = st.text_input("Tên Model")
                 form_data['machine_type'] = st.selectbox("Loại máy", ["Dàn nóng", "Dàn lạnh"])
                 form_data['warranty_months_machine'] = st.number_input("T/g BH Máy (Tháng)", min_value=0, value=24)
                 form_data['warranty_months_compressor'] = st.number_input("T/g BH Block (Tháng)", min_value=0, value=36)
-            elif form_choice == "Form 7: Admin Web ghi nhận nội dung hỗ trợ":
+            elif form_choice_type == "Admin_Web_Noted_Log_Ho_Tro":
                 left_col, right_col = st.columns(2)
                 with left_col:
                     form_data['case_code'] = st.text_input("Mã ca / Mã chứng từ", placeholder="Ví dụ: MBTH2025080234")
@@ -519,7 +520,7 @@ elif page == "🛡️ Hệ thống Bảo hành":
                         height=120,
                         placeholder="Nhập thao tác đã xử lý, kết quả, lưu ý nội bộ",
                     )
-            elif form_choice == "Form 8: Import bảng giá linh kiện":
+            elif form_choice_type == "Import_Bang_Gia_Linh_Kien":
                 form_data['part_code'] = st.text_input("Mã linh kiện")
                 form_data['part_name_vi'] = st.text_input("Tên linh kiện (VI)")
                 form_data['part_name_en'] = st.text_input("Tên linh kiện (EN)")
@@ -531,7 +532,7 @@ elif page == "🛡️ Hệ thống Bảo hành":
                 form_data['classification'] = st.text_input("Phân loại (Vd: CAC)")
                 form_data['discount_rate'] = st.text_input("Tỷ lệ chiết khấu (%)")
                 form_data['sla_bonus_rate'] = st.text_input("Thưởng SLA (%)")
-            elif form_choice == "Form 9: Khai báo danh mục chi phí":
+            elif form_choice_type == "Khai_Bao_Danh_Muc_Chi_Phi":
                 form_data['cost_code'] = st.text_input("Mã chi phí")
                 form_data['content'] = st.text_input("Nội dung")
                 form_data['unit_price'] = st.number_input("Đơn giá", min_value=0, value=0)
@@ -541,13 +542,13 @@ elif page == "🛡️ Hệ thống Bảo hành":
 
             create_col, close_col = st.columns(2)
             if create_col.button("Khởi tạo mã Ticket", use_container_width=True):
-                form5_missing = missing_form5_required_fields(form_data) if form_choice == "Form 5: Đăng ký tài khoản user nội bộ" else []
+                form5_missing = missing_form5_required_fields(form_data) if form_choice_type == "Dang_Ky_Tai_Khoan_User_Noi_Bo" else []
                 if form5_missing:
                     st.warning("Vui lòng nhập đủ thông tin Form 5: " + ", ".join(form5_missing))
                 elif t_user:
                     new_id = gen_ticket_id()
-                    form_type = FORM_LABEL_TO_TYPE.get(form_choice)
-                    status = "Hoàn thành" if form_choice == "Form 7: Admin Web ghi nhận nội dung hỗ trợ" else "Mới tạo"
+                    form_type = form_choice_type
+                    status = "Hoàn thành" if form_choice_type == "Admin_Web_Noted_Log_Ho_Tro" else "Mới tạo"
                     subject = form_choice
                     
                     if db.create_ticket(new_id, subject, t_user, form_type, form_data, status):
