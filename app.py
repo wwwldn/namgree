@@ -2,7 +2,13 @@ import streamlit as st
 import pandas as pd
 import json
 import os
+import datetime
+import random
 from config import Config
+import db
+
+# Khởi tạo database và bảng
+db.init_db()
 
 # Thiết lập cấu hình trang
 st.set_page_config(
@@ -13,6 +19,21 @@ st.set_page_config(
 )
 
 # Custom CSS để giao diện chuyên nghiệp hơn theo brand leducnam.com
+# Danh sách trạng thái chuẩn
+STATUS_LIST = ["Mới tạo", "Đã tiếp nhận", "Đang xử lý", "Chờ xử lý", "Hoàn thành", "Từ chối"]
+STATUS_COLORS = {
+    "Mới tạo": "#3B82F6",       # Xanh dương
+    "Đã tiếp nhận": "#8B5CF6",  # Tím
+    "Đang xử lý": "#F59E0B",    # Vàng cam
+    "Chờ xử lý": "#EF4444",     # Đỏ
+    "Hoàn thành": "#10B981",     # Xanh lá
+    "Từ chối": "#6B7280",       # Xám
+}
+
+def status_badge(status_text):
+    color = STATUS_COLORS.get(status_text, "#6B7280")
+    return f'<span style="background:{color};color:#fff;padding:2px 10px;border-radius:12px;font-size:0.85em;font-weight:600;">{status_text}</span>'
+
 st.markdown("""
 <style>
     .main-header {
@@ -29,79 +50,670 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Lấy dữ liệu từ database
+db_tickets = db.get_all_tickets()
+db_tasks = db.get_tasks()
+
+# Hàm sinh mã Ticket tự động
+def gen_ticket_id():
+    now = datetime.datetime.now()
+    return f"GREE-IT_{now.strftime('%Y%m')}_{random.randint(100, 999)}"
+
+FORM_CONFIGS = [
+    {
+        "label": "Form 1: Phân loại chi phí bảo hành",
+        "type": "Khai_Bao_Model_Bao_Hanh",
+        "title": "Danh sách Model đã cập nhật hệ thống",
+        "columns": [
+            ("Mã Ticket", "id"),
+            ("Tên model", "model_name"),
+            ("Loại chi phí", "cost_type"),
+            ("Công suất", "capacity_range"),
+            ("Loại sản phẩm", "product_type"),
+            ("Ngày y/c", "created_at"),
+            ("Người y/c", "requester"),
+            ("Trạng thái", "status"),
+            ("Ghi chú", "note"),
+        ],
+    },
+    {
+        "label": "Form 2: Khai báo mã linh kiện",
+        "type": "Khai_Bao_Ma_Linh_Kien",
+        "title": "Danh sách mã linh kiện đã cập nhật hệ thống",
+        "columns": [
+            ("Mã Ticket", "id"),
+            ("Mã linh kiện", "part_code"),
+            ("Tên linh kiện (EN)", "part_name_en"),
+            ("Tên linh kiện (VI)", "part_name_vi"),
+            ("Ngày y/c", "created_at"),
+            ("Người y/c", "requester"),
+            ("Trạng thái", "status"),
+            ("Mô tả", "description"),
+        ],
+    },
+    {
+        "label": "Form 3: Yêu cầu điều chỉnh tồn kho hệ thống",
+        "type": "Yeu_Cau_Dieu_Chinh_Ton_Kho",
+        "title": "Danh sách yêu cầu điều chỉnh tồn kho",
+        "columns": [
+            ("Mã Ticket", "id"),
+            ("Kho/Trạm", "warehouse"),
+            ("Mã linh kiện", "part_code"),
+            ("Tính chất LK", "part_nature"),
+            ("Phiếu xuất", "export_voucher"),
+            ("SL điều chỉnh", "adjusted_quantity"),
+            ("Ngày y/c", "created_at"),
+            ("Người y/c", "requester"),
+            ("Trạng thái", "status"),
+            ("Ghi chú", "note"),
+        ],
+    },
+    {
+        "label": "Form 4: Đăng ký thông tin trạm bảo hành mới",
+        "type": "Dang_Ky_Tram_Bao_Hanh_Moi",
+        "title": "Danh sách trạm bảo hành đăng ký mới",
+        "columns": [
+            ("Mã Ticket", "id"),
+            ("Tên công ty", "company_info.name"),
+            ("Mã số thuế", "company_info.tax_code"),
+            ("Email", "company_info.email"),
+            ("Điện thoại", "company_info.phone"),
+            ("User hệ thống", "company_info.system_username"),
+            ("Số KTV", "technicians"),
+            ("Số kho", "associated_warehouses"),
+            ("Ngày y/c", "created_at"),
+            ("Người y/c", "requester"),
+            ("Trạng thái", "status"),
+        ],
+    },
+    {
+        "label": "Form 5: Đăng ký tài khoản user nội bộ",
+        "type": "Dang_Ky_Tai_Khoan_User_Noi_Bo",
+        "title": "Danh sách tài khoản user nội bộ đăng ký mới",
+        "columns": [
+            ("Mã Ticket", "id"),
+            ("Họ tên", "full_name"),
+            ("Điện thoại", "phone"),
+            ("Email Gree", "company_email"),
+            ("Nhóm user", "user_group"),
+            ("Line Call Center", "call_center_line"),
+            ("Link chính", "main_link"),
+            ("Username test", "test_account.username"),
+            ("Password test", "test_account.password"),
+            ("Link test", "test_account.test_link"),
+            ("Ngày y/c", "created_at"),
+            ("Người y/c", "requester"),
+            ("Trạng thái", "status"),
+        ],
+    },
+    {
+        "label": "Form 6: Khai báo Model cho Hồ sơ máy",
+        "type": "Khai_Bao_Model_Ho_So_May",
+        "title": "Danh sách Model hồ sơ máy đã cập nhật hệ thống",
+        "columns": [
+            ("Mã Ticket", "id"),
+            ("Tên model", "model_name"),
+            ("Loại máy", "machine_type"),
+            ("BH Máy (tháng)", "warranty_months_machine"),
+            ("BH Block (tháng)", "warranty_months_compressor"),
+            ("Ngày y/c", "created_at"),
+            ("Người y/c", "requester"),
+            ("Trạng thái", "status"),
+        ],
+    },
+    {
+        "label": "Form 7: Admin Web ghi nhận nội dung hỗ trợ",
+        "type": "Admin_Web_Noted_Log_Ho_Tro",
+        "title": "Danh sách log hỗ trợ Admin Web",
+        "columns": [
+            ("Mã Ticket", "id"),
+            ("Mã ca", "case_code"),
+            ("Người xử lý IT", "it_assignee"),
+            ("Ngày hoàn thành", "completion_date"),
+            ("Ngày y/c", "created_at"),
+            ("Người y/c", "requester"),
+            ("Trạng thái", "status"),
+            ("Nội dung yêu cầu", "request_detail"),
+            ("Log xử lý nội bộ", "internal_action_log"),
+        ],
+    },
+    {
+        "label": "Form 8: Import bảng giá linh kiện",
+        "type": "Import_Bang_Gia_Linh_Kien",
+        "title": "Danh sách giá linh kiện đã cập nhật hệ thống",
+        "columns": [
+            ("Mã Ticket", "id"),
+            ("Mã linh kiện", "part_code"),
+            ("Tên linh kiện (VI)", "part_name_vi"),
+            ("Nhóm Model", "model_group"),
+            ("Loại sản phẩm", "product_type"),
+            ("Giá có VAT", "price_vat"),
+            ("Giá chưa VAT", "price_no_vat"),
+            ("Ngày y/c", "created_at"),
+            ("Người y/c", "requester"),
+            ("Trạng thái", "status"),
+        ],
+    },
+    {
+        "label": "Form 9: Khai báo danh mục chi phí",
+        "type": "Khai_Bao_Danh_Muc_Chi_Phi",
+        "title": "Danh sách danh mục chi phí đã cập nhật hệ thống",
+        "columns": [
+            ("Mã Ticket", "id"),
+            ("Mã chi phí", "cost_code"),
+            ("Nội dung", "content"),
+            ("Đơn giá", "unit_price"),
+            ("Công suất", "capacity"),
+            ("Loại chi phí", "cost_type"),
+            ("Nhóm sản phẩm", "product_group"),
+            ("Ngày y/c", "created_at"),
+            ("Người y/c", "requester"),
+            ("Trạng thái", "status"),
+        ],
+    },
+]
+
+FORM_LABEL_TO_TYPE = {f["label"]: f["type"] for f in FORM_CONFIGS}
+FORM_TYPE_TO_CONFIG = {f["type"]: f for f in FORM_CONFIGS}
+LEGACY_FORM_TYPES = {
+    f["label"]: f["type"] for f in FORM_CONFIGS
+}
+
+def normalize_form_type(form_type):
+    return LEGACY_FORM_TYPES.get(form_type, form_type)
+
+def parse_form_data(ticket):
+    f_json = ticket.get("form_data", {})
+    if isinstance(f_json, str):
+        try:
+            return json.loads(f_json)
+        except Exception:
+            return {}
+    return f_json or {}
+
+def tickets_for_form(tickets, form_type):
+    return [t for t in tickets if normalize_form_type(t.get("form_type")) == form_type]
+
+def format_ticket_date(value):
+    if isinstance(value, datetime.datetime):
+        return value.strftime("%d/%m/%Y")
+    return value or ""
+
+def get_form_value(data, key):
+    value = data
+    for part in key.split("."):
+        if not isinstance(value, dict):
+            return ""
+        value = value.get(part)
+    if isinstance(value, list):
+        return len(value)
+    return value if value is not None else ""
+
+def parse_pipe_rows(raw_text, fields):
+    rows = []
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in line.split("|")]
+        row = {field: parts[idx] if idx < len(parts) else "" for idx, field in enumerate(fields)}
+        rows.append(row)
+    return rows
+
+def missing_form5_required_fields(form_data):
+    required_fields = {
+        "Họ tên": form_data.get("full_name"),
+        "Điện thoại": form_data.get("phone"),
+        "Email Gree": form_data.get("company_email"),
+        "Nhóm user": form_data.get("user_group"),
+        "Link chính": form_data.get("main_link"),
+        "Username test": form_data.get("test_account", {}).get("username"),
+        "Password test": form_data.get("test_account", {}).get("password"),
+        "Link test": form_data.get("test_account", {}).get("test_link"),
+    }
+    return [label for label, value in required_fields.items() if not str(value or "").strip()]
+
+def build_form_rows(tickets, config):
+    rows = []
+    for t in tickets:
+        f_json = parse_form_data(t)
+        row = {}
+        for label, key in config["columns"]:
+            if key == "id":
+                row[label] = t.get("id", "")
+            elif key == "created_at":
+                row[label] = format_ticket_date(t.get("created_at"))
+            elif key == "requester":
+                row[label] = t.get("requester", "")
+            elif key == "status":
+                row[label] = t.get("status", "Mới tạo")
+            else:
+                row[label] = get_form_value(f_json, key)
+        rows.append(row)
+    return rows
+
 # -----------------
-# THIẾT KẾ SIDEBAR
+# THANH ĐIỀU HƯỚNG (SIDEBAR)
 # -----------------
 with st.sidebar:
     st.title(Config.APP_NAME)
     st.markdown(f"**Owner:** {Config.OWNER}")
     st.markdown(f"**Domain:** [{Config.BASE_DOMAIN}{Config.SUB_PATH}](https://{Config.BASE_DOMAIN}{Config.SUB_PATH})")
-    st.divider()
+    st.markdown("---")
     
-    menu = ["🏠 Dashboard", "📚 Tài liệu & Form", "📊 Báo cáo tuần"]
-    choice = st.radio("Điều hướng", menu)
+    menu = [
+        "🏠 Trang chủ", 
+        "🛡️ Phân hệ Bảo hành (Ticket)", 
+        "🏭 Quản trị ERP", 
+        "📱 Gree App Support", 
+        "🔍 Tra cứu An Gia", 
+        "📦 Quản lý XNK", 
+        "🔐 Security Audit", 
+        "🌐 Website", 
+        "📈 Báo cáo tuần", 
+        "⚙️ Cài đặt"
+    ]
+    page = st.radio("SITEMAP HỆ THỐNG", menu)
+    
+    st.markdown("---")
+    st.caption(f"Admin: {Config.OWNER} | 📅 {datetime.date.today()}")
 
 # -----------------
 # GIAO DIỆN CHÍNH
 # -----------------
-if choice == "🏠 Dashboard":
+
+if page == "🏠 Trang chủ":
     st.markdown(f'<div class="main-header">Welcome to {Config.APP_NAME}</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Tổng quan công việc và hệ thống quản lý tại Gree Vietnam</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Dashboard Tổng quát</div>', unsafe_allow_html=True)
     
-    st.info("Bảng điều khiển chính. Hãy chọn các tính năng ở thanh điều hướng bên trái để bắt đầu làm việc.")
-    
-    # Hiển thị các thông số tổng quan
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric(label="Tài liệu & Form", value="Sẵn sàng")
-    with col2:
-        st.metric(label="Báo cáo tuần", value="Giai đoạn 2")
-    with col3:
-        st.metric(label="Database", value="Giai đoạn 3")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Tổng số Ticket", str(len(db_tickets)), "")
+    c2.metric("Đang xử lý", len([t for t in db_tickets if t['status'] not in ['Hoàn thành', 'Từ chối']]))
+    c3.metric("Hoàn thành (Tasks)", len(db_tasks))
+    c4.metric("NCC Issue", "1", "Gấp")
 
-elif choice == "📚 Tài liệu & Form":
-    st.markdown('<div class="main-header">Tài liệu & Form</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Quản lý danh mục hướng dẫn nghiệp vụ và biểu mẫu</div>', unsafe_allow_html=True)
+    st.divider()
+    cl, cr = st.columns(2)
+    with cl:
+        st.subheader("📅 Lịch trình & Ghi chú")
+        st.write("- [ ] Họp ERP chiều thứ 2 (05/05)")
+        st.text_area("Ghi chú nhanh", placeholder="Nhập mã lỗi hoặc ID cần lưu ý...")
+    with cr:
+        st.subheader("🔗 Truy cập nhanh")
+        st.button("Hệ thống ERP", use_container_width=True)
+        st.button("Gree App Admin", use_container_width=True)
+
+elif page == "🛡️ Phân hệ Bảo hành (Ticket)":
+    st.markdown('<div class="main-header">🛡️ Quản trị Ticket & Log Admin</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Quản lý và hỗ trợ xử lý lỗi hệ thống</div>', unsafe_allow_html=True)
+
+    form_scope_options = ["Tất cả Ticket"] + [f["label"] for f in FORM_CONFIGS]
+    selected_scope = st.selectbox(
+        "Form đang xem",
+        form_scope_options,
+        key="ticket_form_scope",
+    )
+    selected_form_type = FORM_LABEL_TO_TYPE.get(selected_scope)
+    selected_config = FORM_TYPE_TO_CONFIG.get(selected_form_type)
+    scoped_tickets = tickets_for_form(db_tickets, selected_form_type) if selected_form_type else db_tickets
     
-    links_file = os.path.join(Config.DATA_DIR, "links.json")
+    btn_col, hint_col = st.columns([0.28, 0.72])
+    with btn_col:
+        if st.button("➕ Tạo Ticket mới", use_container_width=True, disabled=selected_config is None):
+            st.session_state["show_create_ticket"] = not st.session_state.get("show_create_ticket", False)
+    with hint_col:
+        if selected_config:
+            st.caption(f"Ticket mới sẽ được tạo cho: {selected_scope}")
+        else:
+            st.caption("Chọn một Form cụ thể để tạo ticket mới.")
+
+    if selected_config and st.session_state.get("show_create_ticket", False):
+        form_choice = selected_scope
+        with st.container(border=True):
+            st.subheader(f"➕ Tạo Ticket mới - {selected_scope}")
+        
+            t_user = st.text_input("Người yêu cầu", placeholder="Ví dụ: Phượng CAC")
+        
+            form_data = {}
+            if form_choice == "Form 1: Phân loại chi phí bảo hành":
+                left_col, right_col = st.columns(2)
+                with left_col:
+                    form_data['model_name'] = st.text_input("Tên Model", placeholder="Ví dụ: GWC12PB-K3D0P4")
+                    form_data['cost_type'] = st.selectbox("Loại chi phí", ["CAC", "GD - RAC", "ĐH - RAC", "RAC - CT"])
+                    form_data['product_type'] = st.selectbox("Loại sản phẩm", [
+                        "BĐT - Bếp điện từ", 
+                        "Điều hòa dân dụng, treo tường tú đứng dưới 10Hp (RAC)", 
+                        "MHA - Máy hút ẩm", 
+                        "MLKK - Máy lọc không khí", 
+                        "MLM - Máy làm mát bằng hơi nước", 
+                        "Multi, máy âm trần, âm trần nối ống gió, áp trần (CAC)", 
+                        "NAS - Nồi áp suất", 
+                        "NCĐ - nồi cơm điện", 
+                        "Ống gió lớn, Tú đứng lớn, máy lạnh chính xác", 
+                        "QĐ - Quạt điện", 
+                        "VRV/VRF(CAC)", 
+                        "Water cooled packge Chiller"
+                    ])
+                with right_col:
+                    form_data['capacity_range'] = st.selectbox("Công suất", [
+                        "9.000 - 18.000 Btu", "9.000 - 36.000 Btu", "24.000 - 36.000 Btu", 
+                        "36.000 - 42.000 Btu", "42.000 - 60.000 Btu", "100.000 - 200.000 Btu", 
+                        "10Hp - 24Hp", "10Hp - 60Hp"
+                    ])
+                    form_data['note'] = st.text_area("Ghi chú", height=96, placeholder="Thông tin bổ sung nếu có")
+            elif form_choice == "Form 2: Khai báo mã linh kiện":
+                form_data['part_code'] = st.text_input("Mã linh kiện")
+                form_data['part_name_en'] = st.text_input("Tên linh kiện (EN)")
+                form_data['part_name_vi'] = st.text_input("Tên linh kiện (VI)")
+                form_data['description'] = st.text_area("Mô tả")
+            elif form_choice == "Form 3: Yêu cầu điều chỉnh tồn kho hệ thống":
+                left_col, right_col = st.columns(2)
+                with left_col:
+                    form_data['warehouse'] = st.text_input("Kho/Trạm", placeholder="Ví dụ: Hưng Yên - RAC")
+                    form_data['part_code'] = st.text_input("Mã linh kiện", placeholder="Ví dụ: GMC42S6I1")
+                    form_data['part_nature'] = st.selectbox("Tính chất linh kiện", ["", "Linh kiện mượn", "Linh kiện mua"])
+                    form_data['evidence_image_url'] = st.text_input("Link ảnh bằng chứng", placeholder="https://prnt.sc/...")
+                with right_col:
+                    form_data['export_voucher'] = st.text_input("Phiếu xuất", placeholder="Để trống nếu chưa có")
+                    form_data['adjusted_quantity'] = st.number_input("Số lượng điều chỉnh", min_value=0, value=1)
+                    form_data['note'] = st.text_area(
+                        "Ghi chú xử lý",
+                        height=140,
+                        placeholder="Mô tả lệch tồn, hướng xử lý, lưu ý cho kho/trạm",
+                    )
+            elif form_choice == "Form 4: Đăng ký thông tin trạm bảo hành mới":
+                left_col, right_col = st.columns(2)
+                with left_col:
+                    st.markdown("**Thông tin công ty**")
+                    company_name = st.text_input("Tên công ty / Trạm", placeholder="Ví dụ: CÔNG TY TNHH TM DV A.T.P")
+                    tax_code = st.text_input("Mã số thuế", placeholder="Ví dụ: 0301841221")
+                    tax_address = st.text_area("Địa chỉ thuế", height=90)
+                    postal_address = st.text_area("Địa chỉ nhận thư", height=90)
+                    email = st.text_input("Email", placeholder="email@domain.com")
+                    phone = st.text_input("Điện thoại", placeholder="Ví dụ: 0916318948")
+                    system_username = st.text_input("User hệ thống", placeholder="Ví dụ: a.t.p-hochiminh")
+                with right_col:
+                    st.markdown("**Tài khoản & cấu trúc liên quan**")
+                    bank_account = st.text_input("Số tài khoản")
+                    bank_account_name = st.text_input("Tên tài khoản ngân hàng")
+                    bank_name = st.text_input("Ngân hàng")
+                    technicians_raw = st.text_area(
+                        "Danh sách KTV",
+                        height=120,
+                        placeholder="Mỗi dòng: Tên KTV | SĐT | Username",
+                    )
+                    warehouses_raw = st.text_area(
+                        "Danh sách kho liên kết",
+                        height=120,
+                        placeholder="Mỗi dòng: Loại kho | Tên kho | Email",
+                    )
+                form_data = {
+                    "company_info": {
+                        "name": company_name,
+                        "tax_code": tax_code,
+                        "tax_address": tax_address,
+                        "postal_address": postal_address,
+                        "email": email,
+                        "phone": phone,
+                        "bank_account": bank_account,
+                        "bank_account_name": bank_account_name,
+                        "bank_name": bank_name,
+                        "system_username": system_username,
+                    },
+                    "technicians": parse_pipe_rows(technicians_raw, ["name", "phone", "username"]),
+                    "associated_warehouses": parse_pipe_rows(warehouses_raw, ["type", "name", "email"]),
+                }
+            elif form_choice == "Form 5: Đăng ký tài khoản user nội bộ":
+                left_col, right_col = st.columns(2)
+                with left_col:
+                    form_data['full_name'] = st.text_input("Họ tên", placeholder="Ví dụ: Võ Thanh Tùng")
+                    form_data['phone'] = st.text_input("Điện thoại", placeholder="Ví dụ: 0797 704 205")
+                    form_data['company_email'] = st.text_input("Email Gree", placeholder="name@gree.com.vn")
+                    form_data['user_group'] = st.selectbox(
+                        "Nhóm user",
+                        [
+                            "Giám đốc BH",
+                            "Trưởng phòng BH",
+                            "KTV Gree",
+                            "Trưởng phòng XNK",
+                            "Chuyên viên XNK",
+                            "Phòng Thương Mại CAC",
+                            "Phòng Quản Trị",
+                            "Chuyên viên Kế Hoạch",
+                            "Trưởng phòng Kế hoạch",
+                            "Trưởng Phòng Call Center",
+                            "Chuyên Viên Call Center",
+                        ],
+                    )
+                with right_col:
+                    form_data['call_center_line'] = st.text_input("Line Call Center", placeholder="Để trống nếu không áp dụng")
+                    form_data['main_link'] = st.text_input("Link chính", value="https://warranty.gree.com.vn/")
+                    test_username = st.text_input("Username test", value="test")
+                    test_password = st.text_input("Password test", value="123456")
+                    test_link = st.text_input("Link test", value="http://gree.baohanhso.net/")
+                    form_data['test_account'] = {
+                        "username": test_username,
+                        "password": test_password,
+                        "test_link": test_link,
+                    }
+            elif form_choice == "Form 6: Khai báo Model cho Hồ sơ máy":
+                form_data['model_name'] = st.text_input("Tên Model")
+                form_data['machine_type'] = st.selectbox("Loại máy", ["Dàn nóng", "Dàn lạnh"])
+                form_data['warranty_months_machine'] = st.number_input("T/g BH Máy (Tháng)", min_value=0, value=24)
+                form_data['warranty_months_compressor'] = st.number_input("T/g BH Block (Tháng)", min_value=0, value=36)
+            elif form_choice == "Form 7: Admin Web ghi nhận nội dung hỗ trợ":
+                left_col, right_col = st.columns(2)
+                with left_col:
+                    form_data['case_code'] = st.text_input("Mã ca / Mã chứng từ", placeholder="Ví dụ: MBTH2025080234")
+                    form_data['it_assignee'] = st.text_input("Người xử lý IT", value="IT - Nam Lê")
+                    form_data['completion_date'] = st.date_input("Ngày hoàn thành", value=datetime.date.today()).isoformat()
+                    form_data['evidence_link'] = st.text_input("Link bằng chứng", placeholder="https://prnt.sc/...")
+                with right_col:
+                    form_data['request_detail'] = st.text_area(
+                        "Nội dung yêu cầu",
+                        height=120,
+                        placeholder="Nhập nội dung cần hỗ trợ/can thiệp dữ liệu",
+                    )
+                    form_data['internal_action_log'] = st.text_area(
+                        "Log xử lý nội bộ",
+                        height=120,
+                        placeholder="Nhập thao tác đã xử lý, kết quả, lưu ý nội bộ",
+                    )
+            elif form_choice == "Form 8: Import bảng giá linh kiện":
+                form_data['part_code'] = st.text_input("Mã linh kiện")
+                form_data['part_name_vi'] = st.text_input("Tên linh kiện (VI)")
+                form_data['part_name_en'] = st.text_input("Tên linh kiện (EN)")
+                form_data['model_group'] = st.text_input("Nhóm Model")
+                form_data['product_type'] = st.text_input("Loại sản phẩm")
+                form_data['unit_type'] = st.text_input("Loại Unit (Indoor/Outdoor)")
+                form_data['price_vat'] = st.number_input("Giá có VAT", min_value=0, value=0)
+                form_data['price_no_vat'] = st.number_input("Giá chưa VAT", min_value=0, value=0)
+                form_data['classification'] = st.text_input("Phân loại (Vd: CAC)")
+                form_data['discount_rate'] = st.text_input("Tỷ lệ chiết khấu (%)")
+                form_data['sla_bonus_rate'] = st.text_input("Thưởng SLA (%)")
+            elif form_choice == "Form 9: Khai báo danh mục chi phí":
+                form_data['cost_code'] = st.text_input("Mã chi phí")
+                form_data['content'] = st.text_input("Nội dung")
+                form_data['unit_price'] = st.number_input("Đơn giá", min_value=0, value=0)
+                form_data['capacity'] = st.text_input("Công suất (Tùy chọn)")
+                form_data['cost_type'] = st.text_input("Loại chi phí")
+                form_data['product_group'] = st.text_input("Nhóm sản phẩm")
+
+            create_col, close_col = st.columns(2)
+            if create_col.button("Khởi tạo mã Ticket", use_container_width=True):
+                form5_missing = missing_form5_required_fields(form_data) if form_choice == "Form 5: Đăng ký tài khoản user nội bộ" else []
+                if form5_missing:
+                    st.warning("Vui lòng nhập đủ thông tin Form 5: " + ", ".join(form5_missing))
+                elif t_user:
+                    new_id = gen_ticket_id()
+                    form_type = FORM_LABEL_TO_TYPE.get(form_choice)
+                    status = "Hoàn thành" if form_choice == "Form 7: Admin Web ghi nhận nội dung hỗ trợ" else "Mới tạo"
+                    subject = form_choice
+                    
+                    if db.create_ticket(new_id, subject, t_user, form_type, form_data, status):
+                        st.success(f"Đã tạo Ticket: {new_id}")
+                        st.session_state["show_create_ticket"] = False
+                        st.rerun()
+                    else:
+                        st.error("Lỗi khi kết nối CSDL")
+                else:
+                    st.warning("Vui lòng nhập Người yêu cầu")
+            if close_col.button("Đóng form", use_container_width=True):
+                st.session_state["show_create_ticket"] = False
+                st.rerun()
+
+    st.markdown("---")
+
+    if selected_config:
+        st.subheader(f"📊 {selected_config['title']}")
+        master_status_filter = st.selectbox(
+            "🔍 Lọc trạng thái danh sách cập nhật",
+            ["Tất cả"] + STATUS_LIST,
+            key=f"master_filter_{selected_form_type}",
+        )
+        master_tickets = scoped_tickets if master_status_filter == "Tất cả" else [
+            t for t in scoped_tickets if t["status"] == master_status_filter
+        ]
+        master_rows = build_form_rows(master_tickets, selected_config)
+        if master_rows:
+            st.dataframe(pd.DataFrame(master_rows), use_container_width=True)
+        else:
+            st.info(f"Không có bản ghi nào ở trạng thái '{master_status_filter}'.")
+    else:
+        st.info("Chọn từng Form để xem danh sách dữ liệu đã cập nhật riêng của Form đó.")
+
+    st.divider()
     
-    try:
-        # Load danh sách links từ file json
-        with open(links_file, "r", encoding="utf-8") as f:
-            links_data = json.load(f)
+    col_list, col_detail = st.columns([0.4, 0.6])
+    
+    with col_list:
+        st.subheader("📋 Danh sách Ticket")
+        ticket_filter = st.selectbox("🔍 Lọc trạng thái", ["Tất cả"] + STATUS_LIST, key="ticket_filter")
+        filtered_tickets = scoped_tickets if ticket_filter == "Tất cả" else [
+            t for t in scoped_tickets if t["status"] == ticket_filter
+        ]
+        
+        if not filtered_tickets:
+            st.info("Không có ticket nào trong phạm vi đang chọn.")
+
+        for t in filtered_tickets:
+            with st.container(border=True):
+                badge_html = status_badge(t['status'])
+                st.markdown(f"**{t['id']}** &nbsp; {badge_html}", unsafe_allow_html=True)
+                st.caption(f"Từ: {t['requester']} - {t['subject']}")
+                if st.button("Xem chi tiết", key=f"btn_{t['id']}"):
+                    st.session_state['active_ticket_id'] = t["id"]
+
+    with col_detail:
+        st.subheader("💬 Luồng xử lý (Chat-log)")
+        active_ticket_id = st.session_state.get("active_ticket_id")
+        active_candidates = [t for t in scoped_tickets if t["id"] == active_ticket_id]
+        if active_ticket_id and not active_candidates:
+            st.info("Ticket đang chọn không thuộc Form/phạm vi hiện tại. Hãy chọn ticket bên trái.")
+        elif active_candidates:
+            current_t = active_candidates[0]
             
-        for category, items in links_data.items():
-            st.subheader(category)
-            for item in items:
-                st.markdown(f"- [{item['title']}]({item['url']}) - *{item['description']}*")
-                
-    except FileNotFoundError:
-        st.warning(f"Không tìm thấy file dữ liệu tại `{links_file}`. Hãy đảm bảo file `data/links.json` tồn tại.")
-    except Exception as e:
-        st.error(f"Lỗi khi đọc file: {e}")
+            # Nếu có dữ liệu form thì in ra JSON format đẹp mắt
+            if current_t.get('form_data') and current_t.get('form_type'):
+                display_form_type = normalize_form_type(current_t.get("form_type"))
+                display_form_name = FORM_TYPE_TO_CONFIG.get(display_form_type, {}).get("label", display_form_type)
+                st.info(f"📋 Dữ liệu đính kèm: **{display_form_name}**")
+                try:
+                    f_data = parse_form_data(current_t)
+                    st.json(f_data)
+                except Exception as e:
+                    st.error(f"Lỗi hiển thị dữ liệu Form: {e}")
+                    
+            # Hiển thị hội thoại
+            for m in current_t['msgs']:
+                is_admin = m['user'].startswith("Admin")
+                with st.chat_message("assistant" if is_admin else "user"):
+                    label = "🔒 Nội bộ" if m['type'] == "internal" else "🌐 Công khai"
+                    st.write(f"**{m['user']}** ({label})")
+                    st.write(m['msg'])
+                    st.caption(m['time'])
 
-elif choice == "📊 Báo cáo tuần":
-    st.markdown('<div class="main-header">Báo cáo tuần</div>', unsafe_allow_html=True)
+            # Nhập Log mới
+            st.divider()
+            log_msg = st.text_input("Nhập nội dung xử lý (Log)...")
+            log_type = st.radio("Loại log:", ["Công khai", "Nội bộ (Chỉ Admin)"], horizontal=True)
+            
+            c_btn1, c_btn2 = st.columns(2)
+            if c_btn1.button("📩 Gửi Log", use_container_width=True):
+                if log_msg:
+                    mtype = "internal" if "Nội bộ" in log_type else "public"
+                    db.add_ticket_message(current_t['id'], "Admin Nam", log_msg, mtype)
+                    st.rerun()
+                else:
+                    st.warning("Vui lòng nhập nội dung")
+                
+            # Dropdown chuyển trạng thái
+            st.divider()
+            st.markdown("**🔄 Chuyển trạng thái Ticket:**")
+            current_status = current_t['status']
+            new_status = st.selectbox(
+                "Chọn trạng thái mới",
+                STATUS_LIST,
+                index=STATUS_LIST.index(current_status) if current_status in STATUS_LIST else 0,
+                key="status_change"
+            )
+            col_s1, col_s2 = st.columns(2)
+            if col_s1.button("🔄 Cập nhật trạng thái", use_container_width=True):
+                if new_status != current_status:
+                    db.update_ticket_status(current_t['id'], new_status)
+                    if new_status == "Hoàn thành":
+                        action_log = log_msg if log_msg else "Admin đã đánh dấu hoàn thành"
+                        conn_tmp = db.get_connection()
+                        if conn_tmp:
+                            cur_tmp = conn_tmp.cursor()
+                            cur_tmp.execute("INSERT INTO tasks (content, action, status) VALUES (%s, %s, 'Done')", (current_t['subject'], action_log))
+                            conn_tmp.commit()
+                            cur_tmp.close()
+                            conn_tmp.close()
+                        st.balloons()
+                    st.rerun()
+                else:
+                    st.info("Trạng thái không thay đổi.")
+            if col_s2.button("❌ Từ chối Ticket", use_container_width=True):
+                if current_status != "Từ chối":
+                    db.update_ticket_status(current_t['id'], "Từ chối")
+                    st.rerun()
+                else:
+                    st.info("Ticket này đã bị từ chối rồi.")
+        else:
+            st.info("Chọn một ticket bên trái để xem chi tiết.")
+
+elif page == "📈 Báo cáo tuần":
+    st.markdown('<div class="main-header">📊 Tổng hợp Báo cáo</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">Tự động hóa xuất báo cáo công việc</div>', unsafe_allow_html=True)
     
-    st.info("Tính năng này đang trong Giai đoạn 2. Giao diện dưới đây là bản dựng khung (mockup).")
-    
-    # Khung UI nhập liệu
+    if not db_tasks:
+        st.warning("Chưa có task nào được hoàn thành để làm báo cáo.")
+    else:
+        st.write(f"Đã có **{len(db_tasks)}** task hoàn thành trong CSDL.")
+        for t in db_tasks:
+            st.write(f"- ✅ {t['content']} (Action: {t['action']})")
+        
+        st.button("🚀 Khởi tạo file Word (.docx)")
+        
+    st.divider()
+    st.info("Tính năng này đang trong Giai đoạn 2. Dưới đây là khung nhập liệu mở rộng:")
     with st.form("weekly_report_form"):
-        st.subheader("Nhập dữ liệu báo cáo")
         col1, col2 = st.columns([1, 3])
         with col1:
             week_number = st.number_input("Tuần số", min_value=1, max_value=53, value=1)
         with col2:
             reporter_name = st.text_input("Người báo cáo", value=Config.OWNER)
             
-        tasks_completed = st.text_area("Công việc đã hoàn thành", placeholder="Nhập danh sách công việc...")
+        tasks_completed = st.text_area("Công việc đã hoàn thành (Thêm tay)", placeholder="Nhập danh sách công việc...")
         issues = st.text_area("Vấn đề gặp phải", placeholder="Nhập các vấn đề nếu có...")
         
         st.divider()
         st.subheader("Upload file dữ liệu đính kèm (Excel)")
         uploaded_file = st.file_uploader("Chọn file Excel báo cáo", type=["xlsx", "xls"])
         
-        submitted = st.form_submit_button("Xuất Báo Cáo", type="primary")
-        if submitted:
-            st.success("Tính năng xuất báo cáo sẽ được xử lý ở Giai đoạn 2 (đọc và ghi file bằng openpyxl/pandas).")
+        submitted = st.form_submit_button("Lưu Nháp Báo Cáo", type="primary")
+
+else:
+    st.markdown(f'<div class="main-header">{page}</div>', unsafe_allow_html=True)
+    st.info("🚧 Phân hệ này đang được thiết kế giao diện.")
