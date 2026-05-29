@@ -306,11 +306,11 @@ with st.sidebar:
         "🛡️ Hệ thống Bảo hành", 
         "🏭 Quản trị ERP", 
         "📱 Gree App Support", 
-        "🔍 Tra cứu An Gia", 
-        "📦 Quản lý XNK", 
-        "🔐 Security Audit", 
-        "🌐 Website", 
-        "📈 Báo cáo tuần", 
+        #"🔍 Tra cứu An Gia", 
+        #"📦 Quản lý XNK", 
+        #"🔐 Security Audit", 
+        #"🌐 Website", 
+        "📈 Báo cáo tuần của Nam", 
         "⚙️ Cài đặt"
     ]
     page = st.radio("SITEMAP HỆ THỐNG", menu)
@@ -684,7 +684,7 @@ elif page == "🛡️ Hệ thống Bảo hành":
         else:
             st.info("Chọn một ticket bên trái để xem chi tiết.")
 
-elif page == "📈 Báo cáo tuần":
+elif page == "📈 Báo cáo tuần của Nam":
     st.markdown('<div class="main-header">📊 Tổng hợp Báo cáo</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">Tự động hóa xuất báo cáo công việc</div>', unsafe_allow_html=True)
     
