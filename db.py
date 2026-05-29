@@ -3,14 +3,27 @@ from mysql.connector import Error
 import datetime
 import json
 
-DB_CONFIG = {
-    'host': 'localhost',
-    'database': 'namlegree',
-    'user': 'root',
-    'password': '',
-    'charset': 'utf8mb4',
-    'collation': 'utf8mb4_general_ci'
-}
+import streamlit as st
+
+try:
+    DB_CONFIG = {
+        'host': st.secrets["DB_HOST"],
+        'database': st.secrets["DB_NAME"],
+        'user': st.secrets["DB_USER"],
+        'password': st.secrets["DB_PASS"],
+        'port': st.secrets["DB_PORT"]
+    }
+
+except:
+    DB_CONFIG = {
+        'host': 'localhost',
+        'database': 'namlegree',
+        'user': 'root',
+        'password': '',
+        'charset': 'utf8mb4',
+        'collation': 'utf8mb4_general_ci'
+    }
+
 
 def get_connection():
     try:
