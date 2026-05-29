@@ -303,7 +303,7 @@ with st.sidebar:
     
     menu = [
         "🏠 Trang chủ", 
-        "🛡️ Phân hệ Bảo hành (Ticket)", 
+        "🛡️ Hệ thống Bảo hành", 
         "🏭 Quản trị ERP", 
         "📱 Gree App Support", 
         "🔍 Tra cứu An Gia", 
@@ -343,8 +343,8 @@ if page == "🏠 Trang chủ":
         st.button("Hệ thống ERP", use_container_width=True)
         st.button("Gree App Admin", use_container_width=True)
 
-elif page == "🛡️ Phân hệ Bảo hành (Ticket)":
-    st.markdown('<div class="main-header">🛡️ Quản trị Ticket & Log Admin</div>', unsafe_allow_html=True)
+elif page == "🛡️ Hệ thống Bảo hành":
+    st.markdown('<div class="main-header">🛡️ Hệ thống Warranty - Bảo Hành</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">Quản lý và hỗ trợ xử lý lỗi hệ thống</div>', unsafe_allow_html=True)
 
     form_scope_options = ["Tất cả Ticket"] + [f["label"] for f in FORM_CONFIGS]
