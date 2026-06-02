@@ -398,7 +398,8 @@ if st.session_state.get("view_mode") == "only":
                 label = "🔒 Nội bộ" if m['type'] == "internal" else "🌐 Công khai"
                 st.write(f"**{m['user']}** ({label})")
                 st.write(m['msg'])
-                st.caption(m['time'])
+                # Hiển thị ngày và giờ cùng nhau
+                st.caption(f"{m.get('date', '')} • {m.get('time', '')}")
 
         # Gửi log mới (chỉ cho phép Công khai trong chế độ Guest)
         st.divider()
@@ -829,7 +830,8 @@ elif page == "🛡️ Hệ thống Bảo hành":
                     label = "🔒 Nội bộ" if m['type'] == "internal" else "🌐 Công khai"
                     st.write(f"**{m['user']}** ({label})")
                     st.write(m['msg'])
-                    st.caption(m['time'])
+                    # Hiển thị ngày và giờ cùng nhau
+                    st.caption(f"{m.get('date', '')} • {m.get('time', '')}")
 
             # Nhập Log mới
             st.divider()
