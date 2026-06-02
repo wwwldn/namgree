@@ -54,6 +54,14 @@ st.markdown("""
 db_tickets = db.get_all_tickets()
 db_tasks = db.get_tasks()
 
+# -----------------
+# XỬ LÝ DEEP LINKING (URL Query Parameters)
+# -----------------
+url_ticket_id = st.query_params.get("ticket")
+if url_ticket_id and st.session_state.get("view_mode") != "full":
+    st.session_state["view_mode"] = "only"
+    st.session_state["active_ticket_id"] = url_ticket_id
+
 # Hàm sinh mã Ticket tự động
 def gen_ticket_id():
     now = datetime.datetime.now()
@@ -293,8 +301,135 @@ def build_form_rows(tickets, config):
     return rows
 
 # -----------------
+# GIAO DIỆN VIEW-ONLY TINH GỌN (GUEST VIEW)
+# -----------------
+if st.session_state.get("view_mode") == "only":
+    # Ẩn Sidebar hoàn toàn bằng CSS
+    st.markdown("""
+    <style>
+        [data-testid="stSidebar"] {
+            display: none !important;
+        }
+        [data-testid="stSidebarCollapseButton"] {
+            display: none !important;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Tìm kiếm Ticket trong db_tickets
+    target_t = None
+    for t in db_tickets:
+        if t["id"] == url_ticket_id:
+            target_t = t
+            break
+            
+    if target_t:
+        st.markdown(f'<div class="main-header">🔍 Tra cứu Ticket Chi tiết</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="sub-header">Giao diện xem nhanh thông tin yêu cầu bảo hành Gree IT</div>', unsafe_allow_html=True)
+        
+        # Thẻ thông tin tổng quan dạng card đẹp mắt
+        with st.container(border=True):
+            c_g1, c_g2, c_g3, c_g4 = st.columns([0.25, 0.25, 0.25, 0.25])
+            with c_g1:
+                st.markdown(f"**Mã Ticket:**\n`{target_t['id']}`")
+            with c_g2:
+                badge_html = status_badge(target_t['status'])
+                st.markdown(f"**Trạng thái:**\n{badge_html}", unsafe_allow_html=True)
+            with c_g3:
+                st.markdown(f"**Người yêu cầu:**\n`{target_t['requester']}`")
+            with c_g4:
+                st.markdown(f"**Ngày khởi tạo:**\n`{format_ticket_date(target_t['created_at'])}`")
+                
+            st.markdown("---")
+            st.markdown(f"**Tiêu đề yêu cầu:**\n### {target_t['subject']}")
+
+        # Hàng chứa nút chuyển về hệ thống chính
+        col_back_space, col_back_btn = st.columns([0.65, 0.35])
+        with col_back_btn:
+            if st.button("🏠 Mở trong hệ thống đầy đủ", type="primary", use_container_width=True):
+                # Lưu trạng thái để chuyển về Full View
+                st.session_state["view_mode"] = "full"
+                st.session_state["active_ticket_id"] = target_t["id"]
+                st.session_state["selected_page"] = "🛡️ Hệ thống Bảo hành"
+                
+                # Đồng bộ form_scope
+                if target_t.get("form_type"):
+                    disp_type = normalize_form_type(target_t.get("form_type"))
+                    disp_config = FORM_TYPE_TO_CONFIG.get(disp_type)
+                    if disp_config:
+                        st.session_state["ticket_form_scope"] = disp_config["label"]
+                        
+                # Xóa tham số URL
+                st.query_params.clear()
+                st.rerun()
+
+        # Dữ liệu đính kèm (nếu có)
+        if target_t.get('form_data') and target_t.get('form_type'):
+            display_form_type = normalize_form_type(target_t.get("form_type"))
+            display_form_name = FORM_TYPE_TO_CONFIG.get(display_form_type, {}).get("label", display_form_type)
+            st.markdown("---")
+            st.markdown(f"#### 📋 Dữ liệu đính kèm: **{display_form_name}**")
+            
+            # Hiển thị dạng bảng (nếu thuộc cấu hình Form) hoặc JSON
+            display_config = FORM_TYPE_TO_CONFIG.get(display_form_type)
+            if display_config:
+                # Dựng 1 DataFrame gồm 1 hàng duy nhất cho ticket này
+                rows_data = build_form_rows([target_t], display_config)
+                if rows_data:
+                    st.dataframe(pd.DataFrame(rows_data), use_container_width=True)
+            else:
+                try:
+                    f_data = parse_form_data(target_t)
+                    st.json(f_data)
+                except Exception as e:
+                    st.error(f"Lỗi hiển thị dữ liệu Form: {e}")
+
+        # Lịch sử hội thoại (Chat-log)
+        st.markdown("---")
+        st.markdown("#### 💬 Lịch sử trao đổi & Xử lý (Chat-log)")
+        
+        # Vẽ các tin nhắn
+        for m in target_t['msgs']:
+            is_admin = m['user'].startswith("Admin")
+            # Trong chế độ guest, ẩn log nội bộ để bảo mật!
+            if m['type'] == "internal":
+                continue
+            with st.chat_message("assistant" if is_admin else "user"):
+                label = "🔒 Nội bộ" if m['type'] == "internal" else "🌐 Công khai"
+                st.write(f"**{m['user']}** ({label})")
+                st.write(m['msg'])
+                st.caption(m['time'])
+
+        # Gửi log mới (chỉ cho phép Công khai trong chế độ Guest)
+        st.divider()
+        st.markdown("##### 📩 Gửi phản hồi mới")
+        guest_name = st.text_input("Tên của bạn", value=target_t['requester'], key="guest_msg_name")
+        guest_msg = st.text_area("Nội dung phản hồi...", height=80, key="guest_msg_val")
+        
+        if st.button("📩 Gửi phản hồi", use_container_width=True, key="btn_guest_send"):
+            if guest_msg and guest_name:
+                db.add_ticket_message(target_t['id'], guest_name, guest_msg, "public")
+                st.success("Đã gửi phản hồi thành công!")
+                st.rerun()
+            else:
+                st.warning("Vui lòng nhập đầy đủ tên và nội dung phản hồi.")
+    else:
+        st.error(f"❌ Không tìm thấy Ticket với mã yêu cầu `{url_ticket_id}` hoặc yêu cầu đã bị xóa vĩnh viễn khỏi hệ thống.")
+        if st.button("🏠 Quay lại trang chủ hệ thống", type="primary"):
+            st.session_state["view_mode"] = "full"
+            st.query_params.clear()
+            st.rerun()
+            
+    # Dừng chạy code phía dưới để giữ giao diện tinh gọn
+    st.stop()
+
+# -----------------
 # THANH ĐIỀU HƯỚNG (SIDEBAR)
 # -----------------
+# Khởi tạo trạng thái sitemap page mặc định
+if "selected_page" not in st.session_state:
+    st.session_state["selected_page"] = "🏠 Trang chủ"
+
 with st.sidebar:
     st.title(Config.APP_NAME)
     st.markdown(f"**Owner:** {Config.OWNER}")
@@ -313,7 +448,14 @@ with st.sidebar:
         "📈 Báo cáo tuần của Nam", 
         "⚙️ Cài đặt"
     ]
-    page = st.radio("SITEMAP HỆ THỐNG", menu)
+    
+    # Tìm chỉ số trang hiện tại trong menu để làm default index
+    default_page_idx = 0
+    if st.session_state["selected_page"] in menu:
+        default_page_idx = menu.index(st.session_state["selected_page"])
+        
+    page = st.radio("SITEMAP HỆ THỐNG", menu, index=default_page_idx)
+    st.session_state["selected_page"] = page
     
     st.markdown("---")
     st.caption(f"Admin: {Config.OWNER} | 📅 {datetime.date.today()}")
@@ -567,20 +709,20 @@ elif page == "🛡️ Hệ thống Bảo hành":
 
     st.subheader("📊 Dữ liệu danh mục đã cập nhật hệ thống")
     
-    # Cho phép chọn Form để xem bảng dữ liệu, mặc định đồng bộ theo selected_scope
+    # Xác định loại Form cần hiển thị dựa trên selected_scope ở đầu trang
     master_form_options = [f["label"] for f in FORM_CONFIGS]
-    default_idx = 0
-    if selected_scope in master_form_options:
-        default_idx = master_form_options.index(selected_scope)
-        
-    selected_master_form = st.selectbox(
-        "Chọn Form dữ liệu muốn hiển thị danh sách",
-        master_form_options,
-        index=default_idx,
-        key="master_form_select_view"
-    )
     
-    master_form_type = FORM_LABEL_TO_TYPE.get(selected_master_form)
+    if selected_scope in master_form_options:
+        # Nếu đang chọn một Form cụ thể trên đầu trang
+        target_form_label = selected_scope
+        is_default_view = False
+    else:
+        # Nếu đang chọn "Tất cả Ticket", mặc định hiển thị Form 1
+        target_form_label = master_form_options[0]  # Form 1
+        is_default_view = True
+        st.caption("ℹ️ *Đang hiển thị mặc định danh sách Form 1 (Model phân loại chi phí). Chọn một Form cụ thể ở ô 'Form đang xem' trên đầu trang để đồng bộ bảng dữ liệu này.*")
+    
+    master_form_type = FORM_LABEL_TO_TYPE.get(target_form_label)
     master_config = FORM_TYPE_TO_CONFIG.get(master_form_type)
     
     if master_config:
@@ -633,6 +775,11 @@ elif page == "🛡️ Hệ thống Bảo hành":
         elif active_candidates:
             current_t = active_candidates[0]
             
+            # Đường dẫn chia sẻ ticket nhanh dành cho BA/Admin
+            local_share_url = f"http://localhost:8501/?ticket={current_t['id']}"
+            st.markdown("🔗 **Liên kết chia sẻ ticket nhanh (BA-Share):**")
+            st.code(local_share_url, language="text")
+            
             # Nếu có dữ liệu form thì in ra JSON format đẹp mắt
             if current_t.get('form_data') and current_t.get('form_type'):
                 display_form_type = normalize_form_type(current_t.get("form_type"))
@@ -655,7 +802,7 @@ elif page == "🛡️ Hệ thống Bảo hành":
 
             # Nhập Log mới
             st.divider()
-            log_msg = st.text_input("Nhập nội dung xử lý (Log)...")
+            log_msg = st.text_area("Nhập nội dung xử lý (Log)...", height=120, placeholder="Bạn có thể nhập nhiều dòng nội dung log xử lý tại đây...")
             log_type = st.radio("Loại log:", ["Công khai", "Nội bộ (Chỉ Admin)"], horizontal=True)
             
             c_btn1, c_btn2 = st.columns(2)

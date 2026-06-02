@@ -104,6 +104,7 @@ def get_all_tickets():
         msgs = cursor.fetchall()
         for m in msgs:
             m['time'] = m['created_at'].strftime("%H:%M")
+            m['date'] = m['created_at'].strftime("%d/%m/%Y")
         ticket['msgs'] = msgs
         
     cursor.close()
