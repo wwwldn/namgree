@@ -776,9 +776,40 @@ elif page == "🛡️ Hệ thống Bảo hành":
             current_t = active_candidates[0]
             
             # Đường dẫn chia sẻ ticket nhanh dành cho BA/Admin
-            local_share_url = f"http://localhost:8501/?ticket={current_t['id']}"
             st.markdown("🔗 **Liên kết chia sẻ ticket nhanh (BA-Share):**")
-            st.code(local_share_url, language="text")
+            
+            ticket_json = json.dumps(current_t['id'])
+            
+            share_html = (
+                "<div style='font-family: Inter, sans-serif; font-size: 0.95rem; color: #111;'>"
+                "  <div style='margin-bottom: 0.5rem;'>"
+                "    <span style='font-weight: 600;'>Link hiện tại:</span>"
+                "  </div>"
+                "  <div style='display: flex; align-items: center; gap: 0.75rem;'>"
+                "    <code id='share_url_text' style='display: inline-block; padding: 0.6rem 0.8rem; background: #f7f7f8; border-radius: 0.75rem; color: #0f172a; overflow-x: auto; white-space: nowrap; max-width: 100%;'>Đang tạo...</code>"
+                "    <button id='copy_button' style='border: none; padding: 0.6rem 1rem; border-radius: 0.75rem; background: #2563eb; color: white; cursor: pointer;'>Copy</button>"
+                "  </div>"
+                "  <div style='margin-top: 0.5rem;'>"
+                "    <a id='share_url_link' href='#' target='_blank' rel='noreferrer' style='color: #2563eb; text-decoration: none; font-weight: 600;'></a>"
+                "  </div>"
+                "</div>"
+                "<script>"
+                "const ticketId = " + ticket_json + ";"
+                "try {"
+                "  const origin = window.parent.location.origin;"
+                "  const shareUrl = origin + '/?ticket=' + ticketId;"
+                "  const textEl = document.getElementById('share_url_text');"
+                "  const linkEl = document.getElementById('share_url_link');"
+                "  const copyButton = document.getElementById('copy_button');"
+                "  if (textEl) { textEl.textContent = shareUrl; }"
+                "  if (linkEl) { linkEl.href = shareUrl; linkEl.textContent = 'Mở liên kết'; }"
+                "  if (copyButton) { copyButton.addEventListener('click', () => { navigator.clipboard.writeText(shareUrl).then(() => { copyButton.textContent = 'Copied'; setTimeout(() => { copyButton.textContent = 'Copy'; }, 1500); }); }); }"
+                "} catch(e) {"
+                "  console.error('Share URL error:', e);"
+                "}"
+                "</script>"
+            )
+            st.components.v1.html(share_html, height=140)
             
             # Nếu có dữ liệu form thì in ra JSON format đẹp mắt
             if current_t.get('form_data') and current_t.get('form_type'):
