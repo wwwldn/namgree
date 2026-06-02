@@ -181,3 +181,30 @@ def update_ticket_status(ticket_id, new_status):
     cursor.close()
     conn.close()
     return True
+
+def delete_ticket(ticket_id):
+    """Xóa ticket khỏi CSDL (các message liên quan sẽ tự động xóa nhờ CASCADE)."""
+    conn = get_connection()
+    if not conn: return False
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM tickets WHERE id = %s", (ticket_id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return True
+
+def update_ticket_data(ticket_id, subject, requester, form_data):
+    """Cập nhật tiêu đề, người yêu cầu và dữ liệu form đính kèm."""
+    conn = get_connection()
+    if not conn: return False
+    cursor = conn.cursor()
+    form_data_str = json.dumps(form_data, ensure_ascii=False) if form_data else None
+    cursor.execute(
+        "UPDATE tickets SET subject = %s, requester = %s, form_data = %s WHERE id = %s",
+        (subject, requester, form_data_str, ticket_id)
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return True
+

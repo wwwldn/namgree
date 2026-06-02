@@ -565,23 +565,42 @@ elif page == "🛡️ Hệ thống Bảo hành":
 
     st.markdown("---")
 
-    if selected_config:
-        st.subheader(f"📊 {selected_config['title']}")
+    st.subheader("📊 Dữ liệu danh mục đã cập nhật hệ thống")
+    
+    # Cho phép chọn Form để xem bảng dữ liệu, mặc định đồng bộ theo selected_scope
+    master_form_options = [f["label"] for f in FORM_CONFIGS]
+    default_idx = 0
+    if selected_scope in master_form_options:
+        default_idx = master_form_options.index(selected_scope)
+        
+    selected_master_form = st.selectbox(
+        "Chọn Form dữ liệu muốn hiển thị danh sách",
+        master_form_options,
+        index=default_idx,
+        key="master_form_select_view"
+    )
+    
+    master_form_type = FORM_LABEL_TO_TYPE.get(selected_master_form)
+    master_config = FORM_TYPE_TO_CONFIG.get(master_form_type)
+    
+    if master_config:
+        # Lấy tickets của form đó
+        form_tickets = tickets_for_form(db_tickets, master_form_type)
         master_status_filter = st.selectbox(
-            "🔍 Lọc trạng thái danh sách cập nhật",
+            "🔍 Lọc trạng thái bản ghi",
             ["Tất cả"] + STATUS_LIST,
-            key=f"master_filter_{selected_form_type}",
+            key=f"master_filter_{master_form_type}",
         )
-        master_tickets = scoped_tickets if master_status_filter == "Tất cả" else [
-            t for t in scoped_tickets if t["status"] == master_status_filter
+        master_tickets = form_tickets if master_status_filter == "Tất cả" else [
+            t for t in form_tickets if t["status"] == master_status_filter
         ]
-        master_rows = build_form_rows(master_tickets, selected_config)
+        master_rows = build_form_rows(master_tickets, master_config)
         if master_rows:
             st.dataframe(pd.DataFrame(master_rows), use_container_width=True)
         else:
-            st.info(f"Không có bản ghi nào ở trạng thái '{master_status_filter}'.")
+            st.info(f"Chưa có dữ liệu hoặc không có bản ghi nào ở trạng thái '{master_status_filter}' cho form này.")
     else:
-        st.info("Chọn từng Form để xem danh sách dữ liệu đã cập nhật riêng của Form đó.")
+        st.info("Không tìm thấy cấu hình hiển thị dữ liệu cho Form này.")
 
     st.divider()
     
@@ -681,6 +700,56 @@ elif page == "🛡️ Hệ thống Bảo hành":
                     st.rerun()
                 else:
                     st.info("Ticket này đã bị từ chối rồi.")
+
+            # Khu vực Quản trị Admin - Sửa và Xóa Ticket
+            st.divider()
+            with st.expander("🛠️ Quản trị Admin - Chỉnh sửa / Xóa Ticket"):
+                st.markdown("##### ✏️ Chỉnh sửa thông tin Ticket")
+                edit_subject = st.text_input("Tiêu đề Ticket", value=current_t['subject'], key=f"edit_subj_{current_t['id']}")
+                edit_requester = st.text_input("Người yêu cầu", value=current_t['requester'], key=f"edit_req_{current_t['id']}")
+                
+                # Chỉnh sửa form_data JSON
+                edit_form_json = ""
+                has_form = False
+                if current_t.get('form_data') and current_t.get('form_type'):
+                    has_form = True
+                    current_form_data = parse_form_data(current_t)
+                    edit_form_json = st.text_area(
+                        "Dữ liệu đính kèm (JSON)", 
+                        value=json.dumps(current_form_data, indent=4, ensure_ascii=False),
+                        height=200,
+                        key=f"edit_json_{current_t['id']}"
+                    )
+                
+                c_edit1, c_edit2 = st.columns(2)
+                if c_edit1.button("💾 Lưu Thay Đổi", type="primary", use_container_width=True, key=f"btn_save_{current_t['id']}"):
+                    parsed_form_data = None
+                    json_ok = True
+                    if has_form:
+                        try:
+                            parsed_form_data = json.loads(edit_form_json)
+                        except Exception as e:
+                            st.error(f"Dữ liệu JSON không hợp lệ: {e}")
+                            json_ok = False
+                    
+                    if json_ok:
+                        if db.update_ticket_data(current_t['id'], edit_subject, edit_requester, parsed_form_data):
+                            st.success("Đã cập nhật thông tin ticket thành công!")
+                            st.rerun()
+                        else:
+                            st.error("Lỗi khi cập nhật CSDL")
+                            
+                st.markdown("---")
+                st.markdown("##### 🗑️ Xóa Ticket vĩnh viễn")
+                confirm_delete = st.checkbox("Tôi xác nhận muốn xóa vĩnh viễn ticket này khỏi hệ thống.", key=f"conf_del_{current_t['id']}")
+                if st.button("🗑️ Thực hiện Xóa Ticket", type="primary", disabled=not confirm_delete, use_container_width=True, key=f"btn_del_{current_t['id']}"):
+                    if db.delete_ticket(current_t['id']):
+                        st.success("Đã xóa ticket thành công!")
+                        if 'active_ticket_id' in st.session_state:
+                            del st.session_state['active_ticket_id']
+                        st.rerun()
+                    else:
+                        st.error("Lỗi khi xóa ticket khỏi CSDL")
         else:
             st.info("Chọn một ticket bên trái để xem chi tiết.")
 
