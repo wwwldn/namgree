@@ -47,7 +47,7 @@ st.markdown("""
         color: #4B5563;
         margin-bottom: 2rem;
     }
-    header.stAppHeader {display:none;}
+    header.stToolbarActions {display:none;}
 </style>
 """, unsafe_allow_html=True)
 
