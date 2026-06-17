@@ -759,7 +759,11 @@ if "selected_page" not in st.session_state:
     st.session_state["selected_page"] = "🏠 Trang chủ"
 
 with st.sidebar:
-    st.logo("assets/images/logo.png")
+    st.markdown("""
+    <div style="text-align: center; margin-bottom: 1rem;">
+        <img src="assets/images/logo.png" style="width: 100%; max-width: 200px; height: auto;">
+    </div>
+    """, unsafe_allow_html=True)
     st.title(Config.APP_NAME)
     st.markdown(f"**Owner:** {Config.OWNER}")
     st.markdown(f"**Domain:** [{Config.BASE_DOMAIN}{Config.SUB_PATH}](https://{Config.BASE_DOMAIN}{Config.SUB_PATH})")
