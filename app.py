@@ -761,7 +761,7 @@ if "selected_page" not in st.session_state:
 with st.sidebar:
     st.markdown("""
     <div style="text-align: center; margin-bottom: 1rem;">
-        <img src="assets/images/logo.png" style="width: 100%; max-width: 200px; height: auto;">
+        <img src="/app/static/logo.png" style="width: 100%; max-width: 200px; height: auto;">
     </div>
     """, unsafe_allow_html=True)
     st.title(Config.APP_NAME)
