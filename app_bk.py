@@ -582,22 +582,10 @@ def update_next_week_plan_notes(doc, note_text):
         set_cell_lines(row.cells[ghi_chu_idx], [(note_text, False)])
     return True
 
-def update_all_rows_time(table, time_text):
-    """Điền cùng 1 khoảng thời gian vào cột 'T/g giải quyết' cho TẤT CẢ các dòng nội dung
-    (1. ERP, 2. Hệ thống Bảo hành, 3. Gree App, 4. CV IT cơ bản) — chỉ cột thời gian,
-    không đụng tới nội dung công việc của các dòng ngoài Hệ thống Bảo hành."""
-    header_cells = [c.text.strip() for c in table.rows[0].cells]
-    if "T/g giải quyết" not in header_cells:
-        return False
-    time_idx = header_cells.index("T/g giải quyết")
-    for row in table.rows[1:]:
-        set_cell_lines(row.cells[time_idx], [(time_text, False)])
-    return True
-
 def generate_weekly_report_from_template(template_path, ctx):
     """Đổ dữ liệu vào ĐÚNG file mẫu công ty (giữ logo/layout/song ngữ/khung tự đánh giá...),
-    chỉ thay: tiêu đề tuần, tên người báo cáo, nội dung dòng HỆ THỐNG BẢO HÀNH, cột T/g giải quyết
-    của cả 4 dòng, và cột Ghi chú (thời gian) của bảng Kế hoạch công việc tuần sau."""
+    chỉ thay: tiêu đề tuần, tên người báo cáo, nội dung + thời gian dòng HỆ THỐNG BẢO HÀNH,
+    và cột Ghi chú (thời gian) của bảng Kế hoạch công việc tuần sau."""
     doc = Document(template_path)
 
     update_title_paragraphs(doc, ctx['week'], ctx['month'], ctx['year'], ctx['reporter'])
@@ -614,8 +602,10 @@ def generate_weekly_report_from_template(template_path, ctx):
     content_idx = header_cells.index("Các công việc thực hiện")
     set_cell_lines(row.cells[content_idx], build_warranty_section_lines(ctx['warranty_tickets']))
 
-    time_text = f"{ctx['start_date'].strftime('%d/%m')}-{ctx['end_date'].strftime('%d/%m')}/{ctx['end_date'].year}"
-    update_all_rows_time(table, time_text)
+    if "T/g giải quyết" in header_cells:
+        time_idx = header_cells.index("T/g giải quyết")
+        time_text = f"{ctx['start_date'].strftime('%d/%m')}-{ctx['end_date'].strftime('%d/%m')}/{ctx['end_date'].year}"
+        set_cell_lines(row.cells[time_idx], [(time_text, False)])
 
     next_monday = ctx['start_date'] + datetime.timedelta(days=7)
     next_saturday = next_monday + datetime.timedelta(days=5)

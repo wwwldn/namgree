@@ -79,12 +79,19 @@ def init_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             id INT AUTO_INCREMENT PRIMARY KEY,
+            ticket_id VARCHAR(50),
             content VARCHAR(255) NOT NULL,
             action TEXT NOT NULL,
             status VARCHAR(50) DEFAULT 'Done',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Bổ sung ticket_id cho DB đã tồn tại từ trước (sẽ lỗi âm thầm nếu cột đã có)
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN ticket_id VARCHAR(50)")
+    except Error:
+        pass
     
     conn.commit()
     cursor.close()
@@ -125,6 +132,13 @@ def create_ticket(ticket_id, subject, requester, form_type=None, form_data=None,
         "INSERT INTO ticket_messages (ticket_id, user, msg, type) VALUES (%s, %s, %s, 'public')",
         (ticket_id, requester, f"Hệ thống: Ticket tự động được tạo từ form '{form_type}'." if form_type else subject)
     )
+    # Một số form (vd: Form 7 - Admin Log) tạo ticket với trạng thái Hoàn thành ngay từ đầu.
+    # Ghi nhận luôn vào tasks để không bị bỏ sót khỏi báo cáo tuần.
+    if status == 'Hoàn thành':
+        cursor.execute(
+            "INSERT INTO tasks (ticket_id, content, action, status) VALUES (%s, %s, %s, 'Done')",
+            (ticket_id, subject, "Ticket được tạo và hoàn thành ngay khi khởi tạo.")
+        )
     conn.commit()
     cursor.close()
     conn.close()
@@ -154,8 +168,8 @@ def complete_ticket(ticket_id, subject, log_msg):
     cursor = conn.cursor()
     cursor.execute("UPDATE tickets SET status = 'Hoàn thành' WHERE id = %s", (ticket_id,))
     cursor.execute(
-        "INSERT INTO tasks (content, action, status) VALUES (%s, %s, 'Done')",
-        (subject, log_msg)
+        "INSERT INTO tasks (ticket_id, content, action, status) VALUES (%s, %s, %s, 'Done')",
+        (ticket_id, subject, log_msg)
     )
     conn.commit()
     cursor.close()
