@@ -1563,7 +1563,7 @@ elif page == "📈 Báo cáo tuần của Nam":
                     try:
                         docx_buffer = generate_weekly_report_from_template(TEMPLATE_PATH, report_ctx)
                         st.session_state["weekly_report_buffer"] = docx_buffer.getvalue()
-                        st.session_state["weekly_report_filename"] = f"BaoCao_Tuan{report_week}_Thang{report_month}_{report_year}_MauCongTy.docx"
+                        st.session_state["weekly_report_filename"] = f"NAMLE - BC-TUAN {report_week:02d} THANG {report_month:02d}.docx"
                         st.success("Đã tạo file theo mẫu công ty. Bấm nút bên dưới để tải về.")
                     except ValueError as e:
                         st.error(f"Không khớp được cấu trúc file mẫu: {e}")
