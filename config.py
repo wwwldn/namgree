@@ -1,7 +1,7 @@
 import os
 
 class Config:
-    APP_NAME = "NamLeGree Workspace"
+    APP_NAME = "Ticket Management"
     BASE_DOMAIN = "leducnam.com"
     SUB_PATH = "/greevietnam"
     OWNER = "Lê Đức Nam"
