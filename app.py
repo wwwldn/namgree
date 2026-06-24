@@ -1454,7 +1454,16 @@ if page == "🏠 Trang chủ":
 
             for _, row in df_inprogress.iterrows():
                 r_cols = st.columns([1.4, 2.5, 2.2, 1.5, 1.2, 1.5])
-                r_cols[0].markdown(f"`{row['Mã Ticket']}`")
+                _tid = row['Mã Ticket']
+                # Build URL từ Python — lấy base URL hiện tại qua st.query_params
+                # Streamlit không expose base URL trực tiếp, dùng relative path chuẩn
+                _ticket_url = f"/?ticket={_tid}"
+                r_cols[0].markdown(
+                    f"<a href='{_ticket_url}' target='_blank' rel='noreferrer' "
+                    f"style='font-family:monospace;font-size:0.85em;color:#2563eb;"
+                    f"text-decoration:none;font-weight:600;'>{_tid}</a>",
+                    unsafe_allow_html=True
+                )
                 r_cols[1].markdown(row["Tiêu đề"] or "—")
                 r_cols[2].markdown(f"<span style='font-size:0.85em;color:#6B7280;'>{row['Loại Form']}</span>", unsafe_allow_html=True)
                 r_cols[3].markdown(row["Người y/c"] or "—")
