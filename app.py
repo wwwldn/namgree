@@ -1388,7 +1388,7 @@ if page == "🏠 Trang chủ":
     c1.metric("Tổng số Ticket", str(len(db_tickets)), "")
     c2.metric("Đang xử lý", len([t for t in db_tickets if t['status'] not in ['Hoàn thành', 'Từ chối']]))
     c3.metric("Hoàn thành (Tasks)", len(db_tasks))
-    c4.metric("NCC Issue", "1", "Gấp")
+    c4.metric("NCC Issue", "0", "Gấp")
 
     st.divider()
 
