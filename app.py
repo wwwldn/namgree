@@ -835,12 +835,11 @@ with st.sidebar:
     ]
     
     # Tìm chỉ số trang hiện tại trong menu để làm default index
-    default_page_idx = 0
-    if st.session_state["selected_page"] in menu:
-        default_page_idx = menu.index(st.session_state["selected_page"])
-        
-    page = st.radio("SITEMAP HỆ THỐNG", menu, index=default_page_idx)
-    st.session_state["selected_page"] = page
+    page = st.radio(
+        "SITEMAP HỆ THỐNG",
+        menu,
+        key="selected_page"
+    )
     
     st.markdown("---")
     st.caption(f"Admin: {Config.OWNER} | 📅 {datetime.date.today()}")
