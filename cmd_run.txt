@@ -1,1 +1,8 @@
 python -m streamlit run app.py
+
+
+
+mysqldump -h zephyr.proxy.rlwy.net -P 32248 -u root -pDDCTdOFxTKtttRUNSSENWXseaYBDmNyH --skip-ssl railway > backup_railway_%date:~6,4%%date:~3,2%%date:~0,2%.sql
+
+
+Import nhớ tắt khóa ngoại

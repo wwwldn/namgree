@@ -19,7 +19,7 @@ except:
         'host': 'localhost',
         'database': 'namlegree',
         'user': 'root',
-        'password': '',
+        'password': '123456',
         'charset': 'utf8mb4',
         'collation': 'utf8mb4_general_ci'
     }
