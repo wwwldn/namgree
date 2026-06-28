@@ -782,11 +782,11 @@ if st.session_state.get("view_mode") == "only":
         
         # Vẽ các tin nhắn
         for m in target_t['msgs']:
-            is_admin = m['user'].startswith("Admin")
+            is_admin_msg = m['user'].startswith("Admin")
             # Trong chế độ guest, ẩn log nội bộ để bảo mật!
             if m['type'] == "internal":
                 continue
-            with st.chat_message("assistant" if is_admin else "user"):
+            with st.chat_message("assistant" if is_admin_msg else "user"):
                 label = "🔒 Nội bộ" if m['type'] == "internal" else "🌐 Công khai"
                 st.write(f"**{m['user']}** ({label})")
                 st.write(m['msg'])
@@ -861,7 +861,6 @@ with st.sidebar:
             if st.button("Đăng nhập", use_container_width=True, key="btn_admin_login"):
                 if pw_input == ADMIN_PASSWORD:
                     st.session_state["is_admin"] = True
-                    st.session_state["admin_pw_input"] = ""
                     st.rerun()
                 else:
                     st.error("Sai mật khẩu!")
@@ -1297,8 +1296,8 @@ def render_ticket_domain_page(state_key, main_title, subtitle, domain_forms, sho
 
             # Hiển thị hội thoại
             for m in current_t['msgs']:
-                is_admin = m['user'].startswith("Admin")
-                with st.chat_message("assistant" if is_admin else "user"):
+                is_admin_msg = m['user'].startswith("Admin")
+                with st.chat_message("assistant" if is_admin_msg else "user"):
                     label = "🔒 Nội bộ" if m['type'] == "internal" else "🌐 Công khai"
                     st.write(f"**{m['user']}** ({label})")
                     st.write(m['msg'])
