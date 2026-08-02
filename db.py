@@ -34,6 +34,7 @@ def get_connection():
         print(f"Error connecting to MySQL: {e}")
     return None
 
+@st.cache_resource
 def init_db():
     conn = get_connection()
     if not conn:
@@ -92,28 +93,45 @@ def init_db():
         cursor.execute("ALTER TABLE tasks ADD COLUMN ticket_id VARCHAR(50)")
     except Error:
         pass
-    
+
+    # Bảng cấu hình chung (SMTP, lịch gửi báo cáo...) dạng key-value.
+    # Lưu ở DB thay vì trong code vì repo là public.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            setting_key VARCHAR(100) PRIMARY KEY,
+            setting_value TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        )
+    """)
+
     conn.commit()
     cursor.close()
     conn.close()
 
+@st.cache_data(ttl=30)
 def get_all_tickets():
     conn = get_connection()
     if not conn: return []
     cursor = conn.cursor(dictionary=True)
     cursor.execute("SELECT * FROM tickets ORDER BY created_at DESC")
     tickets = cursor.fetchall()
-    
-    # Fetch messages for each ticket
-    for ticket in tickets:
-        cursor.execute("SELECT * FROM ticket_messages WHERE ticket_id = %s ORDER BY created_at ASC", (ticket['id'],))
-        # Format time for UI
-        msgs = cursor.fetchall()
-        for m in msgs:
+
+    # Lấy toàn bộ message của mọi ticket trong 1 query thay vì query lặp lại theo từng ticket
+    if tickets:
+        ticket_ids = [t['id'] for t in tickets]
+        placeholders = ",".join(["%s"] * len(ticket_ids))
+        cursor.execute(
+            f"SELECT * FROM ticket_messages WHERE ticket_id IN ({placeholders}) ORDER BY created_at ASC",
+            ticket_ids
+        )
+        msgs_by_ticket = {}
+        for m in cursor.fetchall():
             m['time'] = m['created_at'].strftime("%H:%M")
             m['date'] = m['created_at'].strftime("%d/%m/%Y")
-        ticket['msgs'] = msgs
-        
+            msgs_by_ticket.setdefault(m['ticket_id'], []).append(m)
+        for ticket in tickets:
+            ticket['msgs'] = msgs_by_ticket.get(ticket['id'], [])
+
     cursor.close()
     conn.close()
     return tickets
@@ -142,6 +160,7 @@ def create_ticket(ticket_id, subject, requester, form_type=None, form_data=None,
     conn.commit()
     cursor.close()
     conn.close()
+    get_all_tickets.clear()
     return True
 
 def add_ticket_message(ticket_id, user, msg, msg_type):
@@ -156,10 +175,11 @@ def add_ticket_message(ticket_id, user, msg, msg_type):
     # Nếu đang 'Mới tạo' thì đổi thành 'Đã tiếp nhận' khi Admin phản hồi
     if user.startswith('Admin'):
         cursor.execute("UPDATE tickets SET status = 'Đã tiếp nhận' WHERE id = %s AND status = 'Mới tạo'", (ticket_id,))
-        
+
     conn.commit()
     cursor.close()
     conn.close()
+    get_all_tickets.clear()
     return True
 
 def complete_ticket(ticket_id, subject, log_msg):
@@ -174,6 +194,7 @@ def complete_ticket(ticket_id, subject, log_msg):
     conn.commit()
     cursor.close()
     conn.close()
+    get_all_tickets.clear()
     return True
 
 def get_tasks():
@@ -195,6 +216,7 @@ def update_ticket_status(ticket_id, new_status):
     conn.commit()
     cursor.close()
     conn.close()
+    get_all_tickets.clear()
     return True
 
 def delete_ticket(ticket_id):
@@ -206,6 +228,36 @@ def delete_ticket(ticket_id):
     conn.commit()
     cursor.close()
     conn.close()
+    get_all_tickets.clear()
+    return True
+
+@st.cache_data(ttl=30)
+def get_settings():
+    """Đọc toàn bộ cấu hình dạng key-value. Trả về dict rỗng nếu chưa cấu hình gì."""
+    conn = get_connection()
+    if not conn: return {}
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT setting_key, setting_value FROM app_settings")
+    settings = {row['setting_key']: row['setting_value'] for row in cursor.fetchall()}
+    cursor.close()
+    conn.close()
+    return settings
+
+def save_settings(values):
+    """Ghi (upsert) nhiều cấu hình cùng lúc. values: dict {key: value}."""
+    conn = get_connection()
+    if not conn: return False
+    cursor = conn.cursor()
+    for key, value in values.items():
+        cursor.execute(
+            "INSERT INTO app_settings (setting_key, setting_value) VALUES (%s, %s) "
+            "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)",
+            (key, "" if value is None else str(value))
+        )
+    conn.commit()
+    cursor.close()
+    conn.close()
+    get_settings.clear()
     return True
 
 def update_ticket_data(ticket_id, subject, requester, form_data):
@@ -221,5 +273,6 @@ def update_ticket_data(ticket_id, subject, requester, form_data):
     conn.commit()
     cursor.close()
     conn.close()
+    get_all_tickets.clear()
     return True
 
