@@ -4,6 +4,7 @@ import json
 import os
 import datetime
 import random
+import secrets
 import calendar
 import io
 import re
@@ -30,6 +31,103 @@ ADMIN_PASSWORD = "gree@2025"  # Đổi password tại đây
 
 def is_admin() -> bool:
     return st.session_state.get("is_admin", False)
+
+# -----------------
+# GHI NHỚ ĐĂNG NHẬP ADMIN (COOKIE)
+# -----------------
+# Streamlit tạo session mới cho mỗi tab/lần tải trang nên session_state không giữ được
+# đăng nhập khi mở link ticket ở tab khác. Lưu 1 token ngẫu nhiên vào cookie, đối chiếu
+# với token lưu trong CSDL. Không bao giờ lưu mật khẩu vào cookie.
+ADMIN_COOKIE_NAME = "namgree_admin"
+ADMIN_SESSION_DAYS = 30
+ADMIN_TOKENS_KEY = "admin_session_tokens"
+
+def _load_admin_tokens():
+    """Đọc danh sách token còn hạn từ CSDL: {token: hạn dùng ISO}."""
+    raw = db.get_settings().get(ADMIN_TOKENS_KEY) or "{}"
+    try:
+        tokens = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    now = datetime.datetime.now(datetime.timezone.utc)
+    valid = {}
+    for token, expires in tokens.items():
+        try:
+            if datetime.datetime.fromisoformat(expires) > now:
+                valid[token] = expires
+        except (ValueError, TypeError):
+            continue
+    return valid
+
+def create_admin_session():
+    """Sinh token mới, lưu vào CSDL và trả về để ghi xuống cookie."""
+    tokens = _load_admin_tokens()
+    token = secrets.token_urlsafe(32)
+    expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=ADMIN_SESSION_DAYS)
+    tokens[token] = expires.isoformat()
+    db.save_settings({ADMIN_TOKENS_KEY: json.dumps(tokens)})
+    return token
+
+def revoke_admin_session(token):
+    """Xóa token khỏi CSDL khi đăng xuất (thiết bị khác vẫn giữ phiên riêng)."""
+    tokens = _load_admin_tokens()
+    if token and token in tokens:
+        tokens.pop(token)
+        db.save_settings({ADMIN_TOKENS_KEY: json.dumps(tokens)})
+
+def write_admin_cookie(token):
+    """Ghi cookie bằng JS. Streamlit không có API ghi cookie phía server."""
+    max_age = ADMIN_SESSION_DAYS * 24 * 3600
+    js = (
+        "<script>"
+        f"var v='{ADMIN_COOKIE_NAME}={token}; path=/; max-age={max_age}; SameSite=Lax'"
+        "+(location.protocol==='https:'?'; Secure':'');"
+        "try{window.parent.document.cookie=v;}catch(e){document.cookie=v;}"
+        "</script>"
+    )
+    st.components.v1.html(js, height=0)
+
+def clear_admin_cookie():
+    js = (
+        "<script>"
+        f"var v='{ADMIN_COOKIE_NAME}=; path=/; max-age=0; SameSite=Lax';"
+        "try{window.parent.document.cookie=v;}catch(e){document.cookie=v;}"
+        "</script>"
+    )
+    st.components.v1.html(js, height=0)
+
+def login_admin():
+    """Đánh dấu đã đăng nhập trong phiên hiện tại và ghi nhớ sang các tab/lần sau."""
+    st.session_state["is_admin"] = True
+    token = create_admin_session()
+    st.session_state["admin_token"] = token
+    st.session_state["pending_admin_cookie"] = token
+
+def logout_admin():
+    revoke_admin_session(st.session_state.get("admin_token"))
+    st.session_state["is_admin"] = False
+    st.session_state.pop("admin_token", None)
+    st.session_state["pending_admin_cookie_clear"] = True
+
+def restore_admin_session():
+    """Khôi phục đăng nhập từ cookie khi mở tab mới hoặc tải lại trang."""
+    if st.session_state.get("is_admin"):
+        return
+    try:
+        token = st.context.cookies.get(ADMIN_COOKIE_NAME)
+    except Exception:
+        return
+    if token and token in _load_admin_tokens():
+        st.session_state["is_admin"] = True
+        st.session_state["admin_token"] = token
+
+def apply_pending_admin_cookie():
+    """Ghi/xóa cookie sau khi rerun (phải gọi ở nhánh giao diện đang hiển thị)."""
+    token = st.session_state.pop("pending_admin_cookie", None)
+    if token:
+        write_admin_cookie(token)
+    if st.session_state.pop("pending_admin_cookie_clear", False):
+        clear_admin_cookie()
 
 # -----------------
 # Đường dẫn logo (đặt file logo.png vào thư mục static/ cạnh app.py)
@@ -91,6 +189,12 @@ st.markdown("""
 # Lấy dữ liệu từ database
 db_tickets = db.get_all_tickets()
 db_tasks = db.get_tasks()
+
+# Khôi phục đăng nhập Admin từ cookie (mở tab mới / tải lại trang không phải đăng nhập lại)
+restore_admin_session()
+# Ghi/xóa cookie sau khi vừa đăng nhập hoặc đăng xuất (đặt ở đây để áp dụng cho
+# cả giao diện đầy đủ lẫn giao diện xem qua link chia sẻ)
+apply_pending_admin_cookie()
 
 # -----------------
 # XỬ LÝ DEEP LINKING (URL Query Parameters)
@@ -1179,14 +1283,15 @@ if st.session_state.get("view_mode") == "only":
                     db.update_ticket_status(target_t['id'], share_status)
                     st.rerun()
             if col_out.button("🚪 Thoát Admin", use_container_width=True, key="btn_share_logout"):
-                st.session_state["is_admin"] = False
+                logout_admin()
                 st.rerun()
         else:
             with st.expander("🔐 Đăng nhập Admin để cập nhật trạng thái"):
+                st.caption(f"Đăng nhập một lần, ghi nhớ {ADMIN_SESSION_DAYS} ngày trên trình duyệt này.")
                 share_pw = st.text_input("Mật khẩu", type="password", key="share_admin_pw")
                 if st.button("Đăng nhập", use_container_width=True, key="btn_share_login"):
                     if share_pw == ADMIN_PASSWORD:
-                        st.session_state["is_admin"] = True
+                        login_admin()
                         st.rerun()
                     else:
                         st.error("Sai mật khẩu.")
@@ -1256,15 +1361,16 @@ with st.sidebar:
     # --- ADMIN LOGIN / LOGOUT ---
     if is_admin():
         st.success(f"🔐 {ADMIN_USERNAME}")
+        st.caption(f"Ghi nhớ đăng nhập {ADMIN_SESSION_DAYS} ngày trên trình duyệt này.")
         if st.button("🚪 Đăng xuất", use_container_width=True, key="btn_logout"):
-            st.session_state["is_admin"] = False
+            logout_admin()
             st.rerun()
     else:
         with st.expander("🔐 Admin Login"):
             pw_input = st.text_input("Mật khẩu", type="password", key="admin_pw_input")
             if st.button("Đăng nhập", use_container_width=True, key="btn_admin_login"):
                 if pw_input == ADMIN_PASSWORD:
-                    st.session_state["is_admin"] = True
+                    login_admin()
                     st.rerun()
                 else:
                     st.error("Sai mật khẩu!")
