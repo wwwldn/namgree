@@ -9,7 +9,6 @@ import io
 import re
 from config import Config
 import db
-import mailer
 
 try:
     from docx import Document
@@ -55,21 +54,9 @@ STATUS_COLORS = {
     "Từ chối": "#6B7280",       # Xám
 }
 
-# Trạng thái coi như đã đóng — dùng để đẩy ticket chưa xong lên đầu danh sách
-CLOSED_STATUSES = {"Hoàn thành", "Từ chối"}
-
 def status_badge(status_text):
     color = STATUS_COLORS.get(status_text, "#6B7280")
     return f'<span style="background:{color};color:#fff;padding:2px 10px;border-radius:12px;font-size:0.85em;font-weight:600;">{status_text}</span>'
-
-def sort_tickets_for_display(tickets):
-    """Sắp xếp danh sách ticket để hiển thị: ticket chưa hoàn thành lên trên,
-    trong mỗi nhóm thì mới nhất trước."""
-    def sort_key(t):
-        created = t.get("created_at")
-        timestamp = created.timestamp() if isinstance(created, datetime.datetime) else 0
-        return (t.get("status") in CLOSED_STATUSES, -timestamp)
-    return sorted(tickets, key=sort_key)
 
 st.markdown("""
 <style>
@@ -325,170 +312,12 @@ GENERAL_FORM_TYPES = {"Yeu_Cau_Tong_Hop_Khac", "ERP_Yeu_Cau_Tong_Hop", "GreeApp_
 
 FORM_LABEL_TO_TYPE = {f["label"]: f["type"] for f in FORM_CONFIGS}
 FORM_TYPE_TO_CONFIG = {f["type"]: f for f in FORM_CONFIGS}
-
-# domain -> (tên trang trong sidebar, state_key dùng để cô lập session_state/widget key)
-DOMAIN_TO_PAGE = {
-    "warranty": ("🛡️ Hệ thống Bảo hành", "bh"),
-    "erp": ("🏭 Quản trị ERP", "erp"),
-    "gree_app": ("📱 Gree App Support", "greeapp"),
-}
 LEGACY_FORM_TYPES = {
     f["label"]: f["type"] for f in FORM_CONFIGS
 }
 
 def normalize_form_type(form_type):
     return LEGACY_FORM_TYPES.get(form_type, form_type)
-
-def goto_ticket_detail(ticket):
-    """Điều hướng sang trang domain tương ứng và mở sẵn chi tiết ticket.
-    Các key active_ticket_id/ticket_form_scope được cô lập theo state_key của từng trang."""
-    disp_config = FORM_TYPE_TO_CONFIG.get(normalize_form_type(ticket.get("form_type")))
-    domain = disp_config.get("domain", "warranty") if disp_config else "warranty"
-    target_page, target_state_key = DOMAIN_TO_PAGE.get(domain, DOMAIN_TO_PAGE["warranty"])
-
-    st.session_state["view_mode"] = "full"
-    # Không gán thẳng "selected_page" (key của st.radio): Streamlit cấm sửa session_state
-    # của widget sau khi widget đã render trong cùng 1 lần chạy. Hoãn lại và áp dụng ở
-    # lần chạy kế tiếp, trước khi radio được tạo.
-    st.session_state["_pending_page"] = target_page
-    st.session_state[f"active_ticket_id_{target_state_key}"] = ticket["id"]
-    if disp_config:
-        st.session_state[f"ticket_form_scope_{target_state_key}"] = disp_config["label"]
-    # Bỏ lọc trạng thái để ticket chắc chắn nằm trong danh sách hiển thị
-    st.session_state[f"ticket_filter_{target_state_key}"] = "Tất cả"
-
-# Nhãn tiếng Việt cho các field không nằm trong "columns" của Form (hoặc field lồng nhau)
-FIELD_LABELS = {
-    "request_title": "Tiêu đề yêu cầu",
-    "request_detail": "Nội dung yêu cầu",
-    "request_category": "Loại yêu cầu",
-    "related_form": "Liên quan Form",
-    "original_ref": "Tham chiếu gốc",
-    "internal_action_log": "Log xử lý nội bộ",
-    "note": "Ghi chú",
-    "description": "Mô tả",
-    "model_name": "Tên Model",
-    "model_group": "Nhóm Model",
-    "machine_type": "Loại máy",
-    "cost_type": "Loại chi phí",
-    "cost_code": "Mã chi phí",
-    "product_type": "Loại sản phẩm",
-    "product_group": "Nhóm sản phẩm",
-    "capacity": "Công suất",
-    "capacity_range": "Công suất",
-    "unit_type": "Loại Unit",
-    "unit_price": "Đơn giá",
-    "price_vat": "Giá có VAT",
-    "price_no_vat": "Giá chưa VAT",
-    "classification": "Phân loại",
-    "discount_rate": "Tỷ lệ chiết khấu (%)",
-    "sla_bonus_rate": "Thưởng SLA (%)",
-    "part_code": "Mã linh kiện",
-    "part_name_vi": "Tên linh kiện (VI)",
-    "part_name_en": "Tên linh kiện (EN)",
-    "part_nature": "Tính chất linh kiện",
-    "warehouse": "Kho/Trạm",
-    "export_voucher": "Phiếu xuất",
-    "adjusted_quantity": "Số lượng điều chỉnh",
-    "evidence_image_url": "Link ảnh bằng chứng",
-    "evidence_link": "Link bằng chứng",
-    "case_code": "Mã ca / Mã chứng từ",
-    "it_assignee": "Người xử lý IT",
-    "completion_date": "Ngày hoàn thành",
-    "warranty_months_machine": "T/g BH Máy (Tháng)",
-    "warranty_months_compressor": "T/g BH Block (Tháng)",
-    "full_name": "Họ tên",
-    "phone": "Điện thoại",
-    "company_email": "Email Gree",
-    "user_group": "Nhóm user",
-    "call_center_line": "Line Call Center",
-    "main_link": "Link chính",
-    "test_account": "Tài khoản test",
-    "username": "Username",
-    "password": "Password",
-    "test_link": "Link test",
-    "company_info": "Thông tin công ty",
-    "technicians": "Danh sách KTV",
-    "associated_warehouses": "Danh sách kho liên kết",
-    "name": "Tên",
-    "type": "Loại",
-    "email": "Email",
-    "tax_code": "Mã số thuế",
-    "tax_address": "Địa chỉ thuế",
-    "postal_address": "Địa chỉ nhận thư",
-    "system_username": "User hệ thống",
-    "bank_account": "Số tài khoản",
-    "bank_account_name": "Tên tài khoản ngân hàng",
-    "bank_name": "Ngân hàng",
-    "content": "Nội dung",
-    "subject": "Tiêu đề",
-}
-
-def build_field_label_map(config):
-    """Gộp nhãn từ cấu hình 'columns' của Form với bảng nhãn mặc định."""
-    labels = dict(FIELD_LABELS)
-    if config:
-        for label, key in config.get("columns", []):
-            labels[key] = label
-    return labels
-
-def field_label(key, labels):
-    return labels.get(key) or key.replace("_", " ").capitalize()
-
-def is_empty_value(value):
-    return value is None or (isinstance(value, str) and not value.strip()) or value == []
-
-def render_form_data_view(form_data, labels, level=0):
-    """Hiển thị form_data dạng dễ đọc: nhãn tiếng Việt + nội dung giữ nguyên xuống dòng.
-    Thay cho st.json() vốn hiển thị JSON thô, key tiếng Anh và \\n khó đọc."""
-    for key, value in form_data.items():
-        if is_empty_value(value):
-            continue  # bỏ qua field trống cho gọn khi dữ liệu nhiều
-        label = field_label(key, labels)
-
-        if isinstance(value, dict):
-            st.markdown(f"{'#' * min(level + 5, 6)} {label}")
-            render_form_data_view(value, labels, level + 1)
-        elif isinstance(value, list):
-            # Nhãn trong "columns" mô tả cột tổng hợp (vd "Số KTV" = đếm số dòng),
-            # không hợp để đặt trên bảng liệt kê -> ưu tiên nhãn mặc định.
-            st.markdown(f"**{FIELD_LABELS.get(key, label)}**")
-            if all(isinstance(x, dict) for x in value):
-                # Danh sách bản ghi (KTV, kho...) -> bảng, đổi key sang nhãn tiếng Việt
-                rows = [{field_label(k, labels): v for k, v in item.items()} for item in value]
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            else:
-                for item in value:
-                    st.markdown(f"- {item}")
-        elif isinstance(value, bool):
-            st.markdown(f"**{label}:** {'✅ Có' if value else '❌ Không'}")
-        elif isinstance(value, str) and ("\n" in value or len(value) > 80):
-            # Nội dung dài/nhiều dòng -> khối riêng, giữ nguyên ngắt dòng
-            st.markdown(f"**{label}**")
-            with st.container(border=True):
-                st.markdown(value.replace("\n", "  \n"))
-        else:
-            st.markdown(f"**{label}:** {value}")
-
-def render_form_data_editor(form_data, key_prefix):
-    """Hiển thị từng field của form_data bằng input riêng (thay vì 1 ô JSON thô)
-    để tránh việc xuống dòng trong nội dung bị hiển thị dưới dạng ký tự \\n khi sửa."""
-    updated = {}
-    for key, value in form_data.items():
-        widget_key = f"{key_prefix}_{key}"
-        if isinstance(value, dict):
-            st.caption(f"**{key}**")
-            updated[key] = render_form_data_editor(value, widget_key)
-        elif isinstance(value, bool):
-            updated[key] = st.checkbox(key, value=value, key=widget_key)
-        elif isinstance(value, (int, float)):
-            updated[key] = st.number_input(key, value=value, key=widget_key)
-        elif isinstance(value, str) and ("\n" in value or len(value) > 60):
-            updated[key] = st.text_area(key, value=value, key=widget_key, height=100)
-        else:
-            updated[key] = st.text_input(key, value="" if value is None else str(value), key=widget_key)
-    return updated
-
 
 def parse_form_data(ticket):
     f_json = ticket.get("form_data", {})
@@ -542,192 +371,6 @@ def week_date_range(year, month, week_no):
     monday = monday0 + datetime.timedelta(days=7 * (week_no - 1))
     saturday = monday + datetime.timedelta(days=5)
     return monday, saturday
-
-def build_report_context(year, month, week, reporter, tickets, tasks, manual_tasks="", issues=""):
-    """Dựng toàn bộ dữ liệu báo cáo tuần. Tách riêng khỏi UI để cả trang Báo cáo lẫn
-    chức năng gửi email tự động đều dùng chung một nguồn số liệu."""
-    start_date, end_date = week_date_range(year, month, week)
-
-    # Ticket được TẠO trong tuần
-    week_new_tickets = [
-        t for t in tickets
-        if to_date(t.get('created_at')) and start_date <= to_date(t.get('created_at')) <= end_date
-    ]
-    # Công việc HOÀN THÀNH trong tuần (theo tasks.created_at = thời điểm đánh dấu Hoàn thành)
-    week_completed_tasks = [
-        task for task in tasks
-        if to_date(task.get('created_at')) and start_date <= to_date(task.get('created_at')) <= end_date
-    ]
-    tickets_by_id = {t['id']: t for t in tickets}
-
-    summary_rows = []
-    for cfg in FORM_CONFIGS:
-        cnt = len([t for t in week_new_tickets if normalize_form_type(t.get('form_type')) == cfg['type']])
-        if cnt:
-            summary_rows.append({"Form": cfg['label'], "Số lượng": cnt})
-
-    completed_rows = []
-    for task in week_completed_tasks:
-        ref_ticket = tickets_by_id.get(task.get('ticket_id'))
-        if ref_ticket:
-            f_type = normalize_form_type(ref_ticket.get('form_type'))
-            f_label = FORM_TYPE_TO_CONFIG.get(f_type, {}).get('label', f_type or '—')
-            completed_rows.append({
-                "id": ref_ticket.get("id", ""),
-                "form_label": f_label,
-                "requester": ref_ticket.get("requester", ""),
-                "subject": ref_ticket.get("subject", task.get("content", "")),
-            })
-        else:
-            # Log cũ chưa có ticket_id (ghi trước khi nâng cấp), hoặc ticket gốc đã bị xóa
-            completed_rows.append({
-                "id": "—", "form_label": "—", "requester": "—",
-                "subject": task.get("content", task.get("action", "")),
-            })
-
-    # Ticket "liên quan tuần này" = tạo mới trong tuần ∪ hoàn thành trong tuần (dù tạo trước đó)
-    week_relevant_ticket_ids = set(t['id'] for t in week_new_tickets)
-    for task in week_completed_tasks:
-        if task.get('ticket_id'):
-            week_relevant_ticket_ids.add(task['ticket_id'])
-    week_relevant_tickets = [t for t in tickets if t['id'] in week_relevant_ticket_ids]
-
-    return {
-        "year": year, "month": month, "week": week,
-        "reporter": reporter, "start_date": start_date, "end_date": end_date,
-        "metrics": [
-            ("Ticket mới trong tuần", len(week_new_tickets)),
-            ("Hoàn thành trong tuần", len(week_completed_tasks)),
-            ("Đang xử lý/Chờ xử lý", len([t for t in week_new_tickets if t['status'] in ['Đang xử lý', 'Chờ xử lý']])),
-            ("Từ chối", len([t for t in week_new_tickets if t['status'] == 'Từ chối'])),
-        ],
-        "summary_rows": summary_rows,
-        "completed_rows": completed_rows,
-        "manual_tasks": manual_tasks,
-        "issues": issues,
-        "week_relevant_tickets": week_relevant_tickets,
-        "week_new_tickets": week_new_tickets,
-        "week_completed_tasks": week_completed_tasks,
-    }
-
-# -----------------
-# GỬI EMAIL BÁO CÁO TUẦN
-# -----------------
-# Streamlit Cloud chạy theo giờ UTC, còn giờ người dùng nhập là giờ Việt Nam (UTC+7)
-# -> luôn quy đổi về VN trước khi so sánh lịch, nếu không sẽ lệch 7 tiếng.
-VN_TZ = datetime.timezone(datetime.timedelta(hours=7))
-WEEKDAY_LABELS = ["Thứ 2", "Thứ 3", "Thứ 4", "Thứ 5", "Thứ 6", "Thứ 7", "Chủ nhật"]
-
-def now_vn():
-    return datetime.datetime.now(VN_TZ)
-
-def week_tag(d):
-    """Định danh tuần (ISO) dùng để chống gửi trùng trong cùng một tuần."""
-    iso = d.isocalendar()
-    return f"{iso[0]}-W{iso[1]:02d}"
-
-def smtp_config_from_settings(settings):
-    return {
-        "host": settings.get("smtp_host", ""),
-        "port": settings.get("smtp_port", "587"),
-        "user": settings.get("smtp_user", ""),
-        "password": settings.get("smtp_password", ""),
-        "sender": settings.get("smtp_sender", ""),
-        "sender_name": settings.get("smtp_sender_name", ""),
-        "security": settings.get("smtp_security", "STARTTLS"),
-    }
-
-# Khoảng chờ tối thiểu giữa 2 lần thử gửi khi lần trước thất bại. Nếu không có, cấu hình SMTP
-# sai sẽ khiến MỌI lần tải trang đều treo chờ timeout SMTP.
-EMAIL_RETRY_COOLDOWN = datetime.timedelta(minutes=30)
-
-def weekly_email_due(settings, now=None):
-    """Đã tới giờ gửi báo cáo tuần và tuần này chưa gửi?"""
-    if settings.get("report_email_enabled") != "1":
-        return False
-    now = now or now_vn()
-    if settings.get("report_email_last_week") == week_tag(now.date()):
-        return False  # tuần này đã gửi rồi
-
-    # Vừa thử gửi và thất bại -> chờ hết cooldown mới thử lại
-    last_attempt = settings.get("report_email_last_attempt_at")
-    if last_attempt:
-        try:
-            attempted_at = datetime.datetime.fromisoformat(last_attempt)
-            if now - attempted_at < EMAIL_RETRY_COOLDOWN:
-                return False
-        except ValueError:
-            pass
-
-    try:
-        target_weekday = int(settings.get("report_email_weekday", "5"))
-        hh, mm = (settings.get("report_email_time") or "17:00").split(":")
-        target_time = datetime.time(int(hh), int(mm))
-    except (ValueError, TypeError):
-        return False
-
-    # Mốc gửi của tuần hiện tại (theo giờ VN)
-    monday = now.date() - datetime.timedelta(days=now.weekday())
-    scheduled = datetime.datetime.combine(
-        monday + datetime.timedelta(days=target_weekday), target_time, tzinfo=VN_TZ
-    )
-    return now >= scheduled
-
-def send_weekly_report_email(settings, tickets, tasks, target_date=None, mark_sent=True):
-    """Dựng báo cáo tuần theo mẫu công ty và gửi kèm email. Trả về (thành công, thông báo)."""
-    if not DOCX_AVAILABLE:
-        return False, "Chưa cài thư viện python-docx nên không tạo được file báo cáo."
-    if not os.path.exists(TEMPLATE_PATH):
-        return False, f"Không tìm thấy file mẫu công ty tại {TEMPLATE_PATH}."
-
-    to_list = mailer.parse_recipients(settings.get("report_email_to"))
-    cc_list = mailer.parse_recipients(settings.get("report_email_cc"))
-    if not to_list:
-        return False, "Chưa cấu hình người nhận (To)."
-
-    target_date = target_date or now_vn().date()
-    year, month = target_date.year, target_date.month
-    week = min(week_of_month(target_date), max_weeks_in_month(year, month))
-
-    ctx = build_report_context(
-        year, month, week,
-        settings.get("report_email_reporter") or Config.OWNER,
-        tickets, tasks,
-    )
-
-    try:
-        buffer = generate_weekly_report_from_template(TEMPLATE_PATH, ctx)
-    except Exception as e:
-        return False, f"Lỗi khi tạo file báo cáo từ mẫu: {e}"
-
-    filename = f"NAMLE - BC-TUAN {week:02d} THANG {month:02d}.docx"
-    period = f"{ctx['start_date'].strftime('%d/%m/%Y')} - {ctx['end_date'].strftime('%d/%m/%Y')}"
-    subject = f"[Gree IT] Báo cáo tuần {week:02d}/tháng {month:02d}/{year} - {ctx['reporter']}"
-    body = (
-        f"Kính gửi Anh/Chị,\n\n"
-        f"Báo cáo công việc tuần {week} tháng {month}/{year} ({period}) được đính kèm trong email này.\n\n"
-        f"Người báo cáo: {ctx['reporter']}\n\n"
-        f"(Email được gửi tự động từ hệ thống {Config.APP_NAME}.)"
-    )
-
-    try:
-        mailer.send_email(
-            smtp_config_from_settings(settings), to_list, cc_list,
-            subject, body, buffer.getvalue(), filename,
-        )
-    except Exception as e:
-        db.save_settings({
-            "report_email_last_error": f"{now_vn().strftime('%d/%m/%Y %H:%M')} - {e}",
-        })
-        return False, f"Gửi email thất bại: {e}"
-
-    if mark_sent:
-        db.save_settings({
-            "report_email_last_week": week_tag(target_date),
-            "report_email_last_sent_at": now_vn().strftime("%d/%m/%Y %H:%M"),
-            "report_email_last_error": "",
-        })
-    return True, f"Đã gửi báo cáo tuần {week}/tháng {month} tới: {', '.join(to_list)}"
 
 def get_form_value(data, key):
     value = data
@@ -1096,7 +739,18 @@ if st.session_state.get("view_mode") == "only":
         col_back_space, col_back_btn = st.columns([0.65, 0.35])
         with col_back_btn:
             if st.button("🏠 Mở trong hệ thống đầy đủ", type="primary", use_container_width=True):
-                goto_ticket_detail(target_t)
+                # Lưu trạng thái để chuyển về Full View
+                st.session_state["view_mode"] = "full"
+                st.session_state["active_ticket_id"] = target_t["id"]
+                st.session_state["selected_page"] = "🛡️ Hệ thống Bảo hành"
+                
+                # Đồng bộ form_scope
+                if target_t.get("form_type"):
+                    disp_type = normalize_form_type(target_t.get("form_type"))
+                    disp_config = FORM_TYPE_TO_CONFIG.get(disp_type)
+                    if disp_config:
+                        st.session_state["ticket_form_scope"] = disp_config["label"]
+                        
                 # Xóa tham số URL
                 st.query_params.clear()
                 st.rerun()
@@ -1108,13 +762,19 @@ if st.session_state.get("view_mode") == "only":
             st.markdown("---")
             st.markdown(f"#### 📋 Dữ liệu đính kèm: **{display_form_name}**")
             
-            # Nhãn tiếng Việt + khối nội dung, thay cho bảng 1 dòng bị cắt chữ khi nội dung dài
+            # Hiển thị dạng bảng (nếu thuộc cấu hình Form) hoặc JSON
             display_config = FORM_TYPE_TO_CONFIG.get(display_form_type)
-            try:
-                f_data = parse_form_data(target_t)
-                render_form_data_view(f_data, build_field_label_map(display_config))
-            except Exception as e:
-                st.error(f"Lỗi hiển thị dữ liệu Form: {e}")
+            if display_config:
+                # Dựng 1 DataFrame gồm 1 hàng duy nhất cho ticket này
+                rows_data = build_form_rows([target_t], display_config)
+                if rows_data:
+                    st.dataframe(pd.DataFrame(rows_data), use_container_width=True)
+            else:
+                try:
+                    f_data = parse_form_data(target_t)
+                    st.json(f_data)
+                except Exception as e:
+                    st.error(f"Lỗi hiển thị dữ liệu Form: {e}")
 
         # Lịch sử hội thoại (Chat-log)
         st.markdown("---")
@@ -1138,7 +798,7 @@ if st.session_state.get("view_mode") == "only":
         st.markdown("##### 📩 Gửi phản hồi mới")
         guest_name = st.text_input("Tên của bạn", value=target_t['requester'], key="guest_msg_name")
         guest_msg = st.text_area("Nội dung phản hồi...", height=80, key="guest_msg_val")
-
+        
         if st.button("📩 Gửi phản hồi", use_container_width=True, key="btn_guest_send"):
             if guest_msg and guest_name:
                 db.add_ticket_message(target_t['id'], guest_name, guest_msg, "public")
@@ -1146,50 +806,6 @@ if st.session_state.get("view_mode") == "only":
                 st.rerun()
             else:
                 st.warning("Vui lòng nhập đầy đủ tên và nội dung phản hồi.")
-
-        # Cập nhật trạng thái ngay trong màn hình chi tiết — chỉ Admin.
-        # Sidebar bị ẩn ở chế độ này nên cần ô đăng nhập riêng tại đây.
-        st.divider()
-        if is_admin():
-            st.markdown("##### 🔄 Cập nhật trạng thái Ticket")
-            share_status = st.selectbox(
-                "Chọn trạng thái mới",
-                STATUS_LIST,
-                index=STATUS_LIST.index(target_t['status']) if target_t['status'] in STATUS_LIST else 0,
-                key="share_status_change",
-            )
-            share_log = st.text_area(
-                "Nội dung xử lý (ghi kèm vào log khi chuyển sang Hoàn thành)",
-                height=80,
-                key="share_status_log",
-            )
-            col_up, col_out = st.columns(2)
-            if col_up.button("🔄 Cập nhật trạng thái", type="primary", use_container_width=True, key="btn_share_update_status"):
-                if share_status == target_t['status']:
-                    st.info("Trạng thái không thay đổi.")
-                elif share_status == "Hoàn thành":
-                    # Dùng complete_ticket để ghi nhận vào bảng tasks cho báo cáo tuần
-                    db.complete_ticket(
-                        target_t['id'],
-                        target_t['subject'],
-                        share_log.strip() or "Admin đã đánh dấu hoàn thành",
-                    )
-                    st.rerun()
-                else:
-                    db.update_ticket_status(target_t['id'], share_status)
-                    st.rerun()
-            if col_out.button("🚪 Thoát Admin", use_container_width=True, key="btn_share_logout"):
-                st.session_state["is_admin"] = False
-                st.rerun()
-        else:
-            with st.expander("🔐 Đăng nhập Admin để cập nhật trạng thái"):
-                share_pw = st.text_input("Mật khẩu", type="password", key="share_admin_pw")
-                if st.button("Đăng nhập", use_container_width=True, key="btn_share_login"):
-                    if share_pw == ADMIN_PASSWORD:
-                        st.session_state["is_admin"] = True
-                        st.rerun()
-                    else:
-                        st.error("Sai mật khẩu.")
     else:
         st.error(f"❌ Không tìm thấy Ticket với mã yêu cầu `{url_ticket_id}` hoặc yêu cầu đã bị xóa vĩnh viễn khỏi hệ thống.")
         if st.button("🏠 Quay lại trang chủ hệ thống", type="primary"):
@@ -1203,29 +819,9 @@ if st.session_state.get("view_mode") == "only":
 # -----------------
 # THANH ĐIỀU HƯỚNG (SIDEBAR)
 # -----------------
-# -----------------
-# TỰ ĐỘNG GỬI BÁO CÁO TUẦN
-# -----------------
-# Streamlit Cloud cho app ngủ khi không ai truy cập nên không thể chạy scheduler nền.
-# Thay vào đó kiểm tra mỗi lần có người mở app: quá giờ hẹn và tuần này chưa gửi thì gửi.
-app_settings = db.get_settings()
-if weekly_email_due(app_settings):
-    # Ghi mốc thử TRƯỚC khi gửi để nếu thất bại thì cooldown có hiệu lực ngay,
-    # tránh mọi lượt truy cập sau đó đều phải chờ timeout SMTP.
-    db.save_settings({"report_email_last_attempt_at": now_vn().isoformat()})
-    ok, msg = send_weekly_report_email(app_settings, db_tickets, db_tasks)
-    if ok:
-        st.toast(f"📧 {msg}")
-    else:
-        print(f"[Gửi báo cáo tuần tự động] Thất bại: {msg}")
-
 # Khởi tạo trạng thái sitemap page mặc định
 if "selected_page" not in st.session_state:
     st.session_state["selected_page"] = "🏠 Trang chủ"
-
-# Áp dụng điều hướng đang chờ (do goto_ticket_detail đặt) trước khi radio được tạo
-if "_pending_page" in st.session_state:
-    st.session_state["selected_page"] = st.session_state.pop("_pending_page")
 
 with st.sidebar:
     if os.path.exists(LOGO_PATH):
@@ -1611,7 +1207,7 @@ def render_ticket_domain_page(state_key, main_title, subtitle, domain_forms, sho
             master_tickets = form_tickets if master_status_filter == "Tất cả" else [
                 t for t in form_tickets if t["status"] == master_status_filter
             ]
-            master_rows = build_form_rows(sort_tickets_for_display(master_tickets), master_config)
+            master_rows = build_form_rows(master_tickets, master_config)
             if master_rows:
                 st.dataframe(pd.DataFrame(master_rows), use_container_width=True)
             else:
@@ -1627,21 +1223,9 @@ def render_ticket_domain_page(state_key, main_title, subtitle, domain_forms, sho
     with col_list:
         st.subheader("📋 Danh sách Ticket")
         ticket_filter = st.selectbox("🔍 Lọc trạng thái", ["Tất cả"] + STATUS_LIST, key=f"ticket_filter_{state_key}")
-        search_query = st.text_input(
-            "🔎 Tìm kiếm",
-            key=f"ticket_search_{state_key}",
-            placeholder="Nhập mã ticket, tiêu đề hoặc người yêu cầu...",
-        )
         filtered_tickets = scoped_tickets if ticket_filter == "Tất cả" else [
             t for t in scoped_tickets if t["status"] == ticket_filter
         ]
-        if search_query.strip():
-            q = search_query.strip().lower()
-            filtered_tickets = [
-                t for t in filtered_tickets
-                if q in t['id'].lower() or q in t['subject'].lower() or q in t['requester'].lower()
-            ]
-        filtered_tickets = sort_tickets_for_display(filtered_tickets)
 
         if not filtered_tickets:
             st.info("Không có ticket nào trong phạm vi đang chọn.")
@@ -1699,15 +1283,14 @@ def render_ticket_domain_page(state_key, main_title, subtitle, domain_forms, sho
             )
             st.components.v1.html(share_html, height=140)
 
-            # Dữ liệu form hiển thị dạng nhãn tiếng Việt + khối nội dung giữ nguyên xuống dòng
+            # Nếu có dữ liệu form thì in ra JSON format đẹp mắt
             if current_t.get('form_data') and current_t.get('form_type'):
                 display_form_type = normalize_form_type(current_t.get("form_type"))
-                display_config = FORM_TYPE_TO_CONFIG.get(display_form_type)
-                display_form_name = (display_config or {}).get("label", display_form_type)
+                display_form_name = FORM_TYPE_TO_CONFIG.get(display_form_type, {}).get("label", display_form_type)
                 st.info(f"📋 Dữ liệu đính kèm: **{display_form_name}**")
                 try:
                     f_data = parse_form_data(current_t)
-                    render_form_data_view(f_data, build_field_label_map(display_config))
+                    st.json(f_data)
                 except Exception as e:
                     st.error(f"Lỗi hiển thị dữ liệu Form: {e}")
 
@@ -1772,23 +1355,36 @@ def render_ticket_domain_page(state_key, main_title, subtitle, domain_forms, sho
                     edit_subject = st.text_input("Tiêu đề Ticket", value=current_t['subject'], key=f"edit_subj_{current_t['id']}")
                     edit_requester = st.text_input("Người yêu cầu", value=current_t['requester'], key=f"edit_req_{current_t['id']}")
 
-                    # Chỉnh sửa form_data theo từng field
+                    # Chỉnh sửa form_data JSON
+                    edit_form_json = ""
                     has_form = False
-                    updated_form_data = None
                     if current_t.get('form_data') and current_t.get('form_type'):
                         has_form = True
                         current_form_data = parse_form_data(current_t)
-                        st.markdown("**Dữ liệu đính kèm**")
-                        updated_form_data = render_form_data_editor(current_form_data, f"edit_field_{current_t['id']}")
+                        edit_form_json = st.text_area(
+                            "Dữ liệu đính kèm (JSON)",
+                            value=json.dumps(current_form_data, indent=4, ensure_ascii=False),
+                            height=200,
+                            key=f"edit_json_{current_t['id']}"
+                        )
 
                     c_edit1, c_edit2 = st.columns(2)
                     if c_edit1.button("💾 Lưu Thay Đổi", type="primary", use_container_width=True, key=f"btn_save_{current_t['id']}"):
-                        parsed_form_data = updated_form_data if has_form else None
-                        if db.update_ticket_data(current_t['id'], edit_subject, edit_requester, parsed_form_data):
-                            st.success("Đã cập nhật thông tin ticket thành công!")
-                            st.rerun()
-                        else:
-                            st.error("Lỗi khi cập nhật CSDL")
+                        parsed_form_data = None
+                        json_ok = True
+                        if has_form:
+                            try:
+                                parsed_form_data = json.loads(edit_form_json)
+                            except Exception as e:
+                                st.error(f"Dữ liệu JSON không hợp lệ: {e}")
+                                json_ok = False
+
+                        if json_ok:
+                            if db.update_ticket_data(current_t['id'], edit_subject, edit_requester, parsed_form_data):
+                                st.success("Đã cập nhật thông tin ticket thành công!")
+                                st.rerun()
+                            else:
+                                st.error("Lỗi khi cập nhật CSDL")
 
                     st.markdown("---")
                     st.markdown("##### 🗑️ Xóa Ticket vĩnh viễn")
@@ -1815,84 +1411,11 @@ if page == "🏠 Trang chủ":
     st.markdown(f'<div class="main-header">Welcome to {Config.APP_NAME}</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">Dashboard Tổng quát</div>', unsafe_allow_html=True)
     
-    open_tickets = sort_tickets_for_display(
-        [t for t in db_tickets if t['status'] not in CLOSED_STATUSES]
-    )
-
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Tổng số Ticket", str(len(db_tickets)), "")
-    c2.metric("Đang xử lý", len(open_tickets))
+    c2.metric("Đang xử lý", len([t for t in db_tickets if t['status'] not in ['Hoàn thành', 'Từ chối']]))
     c3.metric("Hoàn thành (Tasks)", len(db_tasks))
-    c4.metric("Chờ xử lý", len([t for t in open_tickets if t['status'] == 'Chờ xử lý']))
-
-    st.divider()
-    # --- DANH SÁCH ĐANG XỬ LÝ ---
-    in_progress_statuses = [s for s in STATUS_LIST if s not in CLOSED_STATUSES]
-
-    st.subheader(f"🔄 Danh sách đang xử lý ({len(open_tickets)} ticket)")
-
-    if open_tickets:
-        filter_col1, filter_col2 = st.columns([2, 3])
-        with filter_col1:
-            filter_status = st.selectbox(
-                "Lọc theo trạng thái",
-                ["Tất cả"] + in_progress_statuses,
-                key="home_filter_status"
-            )
-        with filter_col2:
-            filter_keyword = st.text_input(
-                "Tìm theo mã ticket / tiêu đề / người y/c",
-                placeholder="Nhập từ khóa...",
-                key="home_filter_kw"
-            )
-
-        filtered = open_tickets
-        if filter_status != "Tất cả":
-            filtered = [t for t in filtered if t.get("status") == filter_status]
-        if filter_keyword.strip():
-            kw = filter_keyword.strip().lower()
-            filtered = [
-                t for t in filtered
-                if kw in str(t.get("id", "")).lower()
-                or kw in str(t.get("subject", "")).lower()
-                or kw in str(t.get("requester", "")).lower()
-            ]
-
-        if filtered:
-            col_widths = [1.4, 2.5, 2.2, 1.5, 1.2, 1.5, 1.2]
-            header_cols = st.columns(col_widths)
-            headers = ["Mã Ticket", "Tiêu đề", "Loại Form", "Người y/c", "Ngày tạo", "Trạng thái", ""]
-            for col, h in zip(header_cols, headers):
-                col.markdown(f"**{h}**")
-            st.markdown("<hr style='margin:4px 0 8px 0;border-color:#e5e7eb;'>", unsafe_allow_html=True)
-
-            for t in filtered:
-                f_type = normalize_form_type(t.get("form_type"))
-                f_label = FORM_TYPE_TO_CONFIG.get(f_type, {}).get("label", f_type or "—")
-                short_label = re.sub(r"^(Form \d+|ERP-\d+|GreeApp-\d+):\s*", "", f_label)
-                tid = t.get("id", "")
-
-                r_cols = st.columns(col_widths)
-                # Bấm mã ticket: mở màn xem nhanh ở tab mới (dùng để gửi link cho người khác)
-                r_cols[0].markdown(
-                    f"<a href='/?ticket={tid}' target='_blank' rel='noreferrer' "
-                    f"style='font-family:monospace;font-size:0.85em;color:#2563eb;"
-                    f"text-decoration:none;font-weight:600;'>{tid}</a>",
-                    unsafe_allow_html=True
-                )
-                r_cols[1].markdown(t.get("subject") or "—")
-                r_cols[2].markdown(f"<span style='font-size:0.85em;color:#6B7280;'>{short_label}</span>", unsafe_allow_html=True)
-                r_cols[3].markdown(t.get("requester") or "—")
-                r_cols[4].markdown(f"<span style='font-size:0.85em;'>{format_ticket_date(t.get('created_at'))}</span>", unsafe_allow_html=True)
-                r_cols[5].markdown(status_badge(t.get("status", "")), unsafe_allow_html=True)
-                # Nút: mở thẳng trong app (có quyền Admin để xử lý ticket)
-                if r_cols[6].button("Chi tiết", key=f"home_goto_{tid}", use_container_width=True):
-                    goto_ticket_detail(t)
-                    st.rerun()
-        else:
-            st.info("Không có ticket nào khớp với bộ lọc.")
-    else:
-        st.success("✅ Hiện không có ticket nào đang chờ xử lý!")
+    c4.metric("NCC Issue", "1", "Gấp")
 
     st.divider()
     cl, cr = st.columns(2)
@@ -1956,23 +1479,57 @@ elif page == "📈 Báo cáo tuần của Nam":
         f"(Tuần {report_week} tháng {report_month}/{report_year})"
     )
 
-    # Số liệu báo cáo dựng bằng hàm dùng chung với chức năng gửi email tự động
-    base_ctx = build_report_context(report_year, report_month, report_week, reporter_name, db_tickets, db_tasks)
-    week_new_tickets = base_ctx["week_new_tickets"]
-    week_completed_tasks = base_ctx["week_completed_tasks"]
-    summary_rows = base_ctx["summary_rows"]
-    completed_rows = base_ctx["completed_rows"]
+    # Ticket được TẠO trong tuần đang chọn
+    week_new_tickets = [
+        t for t in db_tickets
+        if to_date(t.get('created_at')) and start_date <= to_date(t.get('created_at')) <= end_date
+    ]
+    # Công việc HOÀN THÀNH trong tuần đang chọn — dùng tasks.created_at (ghi nhận đúng thời điểm
+    # đánh dấu Hoàn thành, không phải ngày tạo ticket), join lại với tickets qua ticket_id để lấy đủ thông tin.
+    tickets_by_id = {t['id']: t for t in db_tickets}
+    week_completed_tasks = [
+        task for task in db_tasks
+        if to_date(task.get('created_at')) and start_date <= to_date(task.get('created_at')) <= end_date
+    ]
 
     st.divider()
     m1, m2, m3, m4 = st.columns(4)
-    for col, (label, value) in zip((m1, m2, m3, m4), base_ctx["metrics"]):
-        col.metric(label, value)
+    m1.metric("Ticket mới trong tuần", len(week_new_tickets))
+    m2.metric("Hoàn thành trong tuần", len(week_completed_tasks))
+    m3.metric("Đang xử lý/Chờ xử lý", len([t for t in week_new_tickets if t['status'] in ['Đang xử lý', 'Chờ xử lý']]))
+    m4.metric("Từ chối", len([t for t in week_new_tickets if t['status'] == 'Từ chối']))
+
+    summary_rows = []
+    for cfg in FORM_CONFIGS:
+        cnt = len([t for t in week_new_tickets if normalize_form_type(t.get('form_type')) == cfg['type']])
+        if cnt:
+            summary_rows.append({"Form": cfg['label'], "Số lượng": cnt})
 
     if summary_rows:
         st.subheader("📊 Ticket mới theo Form")
         st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
     st.subheader("✅ Danh sách công việc đã hoàn thành trong tuần")
+    completed_rows = []
+    for task in week_completed_tasks:
+        ref_ticket = tickets_by_id.get(task.get('ticket_id'))
+        if ref_ticket:
+            f_type = normalize_form_type(ref_ticket.get('form_type'))
+            f_label = FORM_TYPE_TO_CONFIG.get(f_type, {}).get('label', f_type or '—')
+            completed_rows.append({
+                "id": ref_ticket.get("id", ""),
+                "form_label": f_label,
+                "requester": ref_ticket.get("requester", ""),
+                "subject": ref_ticket.get("subject", task.get("content", "")),
+            })
+        else:
+            # Log cũ chưa có ticket_id (ghi trước khi nâng cấp), hoặc ticket gốc đã bị xóa
+            completed_rows.append({
+                "id": "—",
+                "form_label": "—",
+                "requester": "—",
+                "subject": task.get("content", task.get("action", "")),
+            })
     if completed_rows:
         st.dataframe(
             pd.DataFrame(completed_rows).rename(columns={
@@ -1994,12 +1551,33 @@ elif page == "📈 Báo cáo tuần của Nam":
     manual_tasks = st.text_area("Công việc khác ngoài hệ thống ticket", placeholder="Những việc đã làm nhưng chưa tạo ticket...")
     issues = st.text_area("Vấn đề gặp phải / Rủi ro cần lưu ý", placeholder="Nhập các vấn đề nếu có...")
 
+    # Tập hợp ticket "liên quan tuần này" để đổ vào mục HỆ THỐNG BẢO HÀNH của mẫu công ty:
+    # = ticket mới tạo trong tuần ∪ ticket được đánh dấu hoàn thành trong tuần (dù tạo trước đó)
+    week_relevant_ticket_ids = set(t['id'] for t in week_new_tickets)
+    for task in week_completed_tasks:
+        if task.get('ticket_id'):
+            week_relevant_ticket_ids.add(task['ticket_id'])
+    week_relevant_tickets = [t for t in db_tickets if t['id'] in week_relevant_ticket_ids]
+
     st.divider()
     if not DOCX_AVAILABLE:
         st.error("Chưa cài thư viện `python-docx`. Vui lòng chạy `pip install python-docx` rồi khởi động lại app để dùng tính năng xuất Word.")
     else:
-        # Bổ sung phần nhập tay vào ngữ cảnh đã dựng ở trên
-        report_ctx = dict(base_ctx, manual_tasks=manual_tasks, issues=issues)
+        report_ctx = {
+            "year": report_year, "month": report_month, "week": report_week,
+            "reporter": reporter_name, "start_date": start_date, "end_date": end_date,
+            "metrics": [
+                ("Ticket mới trong tuần", len(week_new_tickets)),
+                ("Hoàn thành trong tuần", len(week_completed_tasks)),
+                ("Đang xử lý/Chờ xử lý", len([t for t in week_new_tickets if t['status'] in ['Đang xử lý', 'Chờ xử lý']])),
+                ("Từ chối", len([t for t in week_new_tickets if t['status'] == 'Từ chối'])),
+            ],
+            "summary_rows": summary_rows,
+            "completed_rows": completed_rows,
+            "manual_tasks": manual_tasks,
+            "issues": issues,
+            "week_relevant_tickets": week_relevant_tickets,
+        }
 
         exp_col1, exp_col2 = st.columns(2)
         with exp_col1:
@@ -2036,158 +1614,6 @@ elif page == "📈 Báo cáo tuần của Nam":
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 use_container_width=True,
             )
-
-elif page == "⚙️ Cài đặt":
-    if not is_admin():
-        st.warning("🔐 Chức năng này chỉ dành cho Admin. Vui lòng đăng nhập ở sidebar.")
-        st.stop()
-
-    st.markdown('<div class="main-header">⚙️ Cài đặt hệ thống</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Cấu hình email và lịch gửi báo cáo tuần</div>', unsafe_allow_html=True)
-
-    cfg = db.get_settings()
-
-    tab_smtp, tab_schedule = st.tabs(["📮 Cấu hình SMTP", "🗓️ Lịch gửi báo cáo tuần"])
-
-    with tab_smtp:
-        st.caption(
-            "Thông tin này lưu trong CSDL, không nằm trong mã nguồn. "
-            "Với Gmail phải dùng **App Password** (16 ký tự) chứ không dùng mật khẩu đăng nhập thường."
-        )
-        sc1, sc2 = st.columns(2)
-        with sc1:
-            smtp_host = st.text_input("SMTP Host", value=cfg.get("smtp_host", ""), placeholder="smtp.gmail.com")
-            smtp_user = st.text_input("Tài khoản đăng nhập", value=cfg.get("smtp_user", ""), placeholder="ten@gmail.com")
-            smtp_sender = st.text_input("Email người gửi (From)", value=cfg.get("smtp_sender", ""), placeholder="ten@gmail.com")
-        with sc2:
-            smtp_port = st.text_input("Port", value=cfg.get("smtp_port", "587"), placeholder="587")
-            smtp_password = st.text_input(
-                "Mật khẩu / App Password", value=cfg.get("smtp_password", ""), type="password",
-            )
-            smtp_sender_name = st.text_input(
-                "Tên hiển thị người gửi", value=cfg.get("smtp_sender_name", Config.OWNER),
-            )
-        security_options = ["STARTTLS", "SSL", "NONE"]
-        current_security = cfg.get("smtp_security", "STARTTLS")
-        smtp_security = st.radio(
-            "Bảo mật kết nối",
-            security_options,
-            index=security_options.index(current_security) if current_security in security_options else 0,
-            horizontal=True,
-            help="Gmail/Outlook port 587 dùng STARTTLS, port 465 dùng SSL.",
-        )
-
-        if st.button("💾 Lưu cấu hình SMTP", type="primary", use_container_width=True):
-            db.save_settings({
-                "smtp_host": smtp_host.strip(),
-                "smtp_port": smtp_port.strip(),
-                "smtp_user": smtp_user.strip(),
-                "smtp_password": smtp_password,
-                "smtp_sender": smtp_sender.strip(),
-                "smtp_sender_name": smtp_sender_name.strip(),
-                "smtp_security": smtp_security,
-            })
-            st.success("Đã lưu cấu hình SMTP.")
-            st.rerun()
-
-        st.divider()
-        st.markdown("##### 🧪 Gửi email thử")
-        test_to = st.text_input("Gửi thử tới", value=cfg.get("smtp_sender", ""), key="smtp_test_to")
-        if st.button("📨 Gửi email thử", use_container_width=True, key="btn_smtp_test"):
-            missing = mailer.validate_smtp_config(smtp_config_from_settings(cfg))
-            if missing:
-                st.error("Chưa lưu đủ cấu hình: " + ", ".join(missing) + ". Hãy bấm Lưu cấu hình SMTP trước.")
-            elif not test_to.strip():
-                st.warning("Vui lòng nhập email nhận thử.")
-            else:
-                try:
-                    mailer.send_email(
-                        smtp_config_from_settings(cfg),
-                        mailer.parse_recipients(test_to), [],
-                        f"[{Config.APP_NAME}] Email thử cấu hình SMTP",
-                        "Nếu bạn nhận được email này, cấu hình SMTP đã hoạt động.",
-                    )
-                    st.success(f"Đã gửi email thử tới {test_to}. Kiểm tra hộp thư (kể cả mục Spam).")
-                except Exception as e:
-                    st.error(f"Gửi thất bại: {e}")
-
-    with tab_schedule:
-        st.caption(
-            "Hệ thống gửi **file .docx theo mẫu công ty** của tuần hiện tại. "
-            "Giờ nhập ở đây là **giờ Việt Nam**."
-        )
-
-        enabled = st.toggle("Bật gửi báo cáo tuần tự động", value=cfg.get("report_email_enabled") == "1")
-
-        rc1, rc2 = st.columns(2)
-        with rc1:
-            weekday_index = int(cfg.get("report_email_weekday", "5") or 5)
-            report_weekday = st.selectbox(
-                "Gửi vào",
-                list(range(7)),
-                index=weekday_index if 0 <= weekday_index <= 6 else 5,
-                format_func=lambda i: WEEKDAY_LABELS[i],
-            )
-        with rc2:
-            try:
-                hh, mm = (cfg.get("report_email_time") or "17:00").split(":")
-                default_time = datetime.time(int(hh), int(mm))
-            except (ValueError, TypeError):
-                default_time = datetime.time(17, 0)
-            report_time = st.time_input("Lúc (giờ VN)", value=default_time)
-
-        email_to = st.text_area(
-            "Người nhận (To)",
-            value=cfg.get("report_email_to", ""),
-            height=80,
-            placeholder="Nhiều email cách nhau bằng dấu phẩy hoặc xuống dòng",
-        )
-        email_cc = st.text_area(
-            "CC (tùy chọn)", value=cfg.get("report_email_cc", ""), height=68,
-        )
-        email_reporter = st.text_input(
-            "Tên người báo cáo trong file", value=cfg.get("report_email_reporter", Config.OWNER),
-        )
-
-        if st.button("💾 Lưu lịch gửi", type="primary", use_container_width=True):
-            db.save_settings({
-                "report_email_enabled": "1" if enabled else "0",
-                "report_email_weekday": str(report_weekday),
-                "report_email_time": report_time.strftime("%H:%M"),
-                "report_email_to": email_to.strip(),
-                "report_email_cc": email_cc.strip(),
-                "report_email_reporter": email_reporter.strip(),
-            })
-            st.success("Đã lưu lịch gửi báo cáo tuần.")
-            st.rerun()
-
-        st.divider()
-        st.markdown("##### 📤 Gửi ngay (không chờ lịch)")
-        st.caption("Gửi báo cáo tuần hiện tại ngay lập tức. Không tính là lần gửi tự động của tuần.")
-        if st.button("📤 Gửi báo cáo tuần ngay", use_container_width=True, key="btn_send_report_now"):
-            with st.spinner("Đang tạo báo cáo và gửi email..."):
-                ok, msg = send_weekly_report_email(cfg, db_tickets, db_tasks, mark_sent=False)
-            if ok:
-                st.success(msg)
-            else:
-                st.error(msg)
-
-        st.divider()
-        st.markdown("##### 📋 Tình trạng")
-        now_local = now_vn()
-        st.write(f"- Giờ hệ thống (VN): **{now_local.strftime('%d/%m/%Y %H:%M')}**")
-        st.write(f"- Lần gửi tự động gần nhất: **{cfg.get('report_email_last_sent_at') or 'Chưa gửi lần nào'}**")
-        if cfg.get("report_email_last_week"):
-            st.write(f"- Tuần đã gửi: **{cfg.get('report_email_last_week')}**")
-        if cfg.get("report_email_last_error"):
-            st.error(f"Lỗi lần gửi gần nhất: {cfg.get('report_email_last_error')}")
-
-        st.info(
-            "⚠️ **Lưu ý về độ chính xác của giờ gửi:** Streamlit Cloud cho app ngủ khi không có ai truy cập, "
-            "nên hệ thống kiểm tra lịch mỗi lần có người mở app. Nếu qua giờ hẹn mà cả ngày không ai vào app, "
-            "email sẽ được gửi ở lần truy cập kế tiếp (vẫn trong tuần đó, không bị gửi trùng). "
-            "Muốn gửi đúng giờ tuyệt đối cần thêm bộ hẹn giờ chạy bên ngoài (ví dụ GitHub Actions)."
-        )
 
 else:
     st.markdown(f'<div class="main-header">{page}</div>', unsafe_allow_html=True)
