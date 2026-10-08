@@ -11,10 +11,11 @@ try:
         'database': st.secrets["DB_NAME"],
         'user': st.secrets["DB_USER"],
         'password': st.secrets["DB_PASS"],
-        'port': st.secrets["DB_PORT"]
+        'port': int(st.secrets["DB_PORT"])
     }
 
-except:
+except Exception as e:
+    print(f"Không đọc được st.secrets ({e!r}) → dùng DB localhost")
     DB_CONFIG = {
         'host': 'localhost',
         'database': 'namlegree',
@@ -32,6 +33,8 @@ def get_connection():
             return conn
     except Error as e:
         print(f"Error connecting to MySQL: {e}")
+        # Hiện lỗi lên web — trước đây chỉ print nên trang trống mà không ai biết vì sao
+        st.error(f"❌ Không kết nối được DB `{DB_CONFIG.get('host')}:{DB_CONFIG.get('port', 3306)}` — {e}")
     return None
 
 @st.cache_resource
