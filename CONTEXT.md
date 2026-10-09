@@ -34,10 +34,10 @@ Xây dựng công cụ cá nhân hóa để quản lý công việc tại **Gree
 ### Lưu ý khi import file dump (.sql) vào TiDB
 - File dump xếp bảng theo ABC → `ticket_messages` được tạo **trước** `tickets`. Nếu khóa ngoại chưa tắt, bảng `ticket_messages` lỗi và bị bỏ qua.
 - Dòng `/*!40014 SET ... FOREIGN_KEY_CHECKS=0 */` có sẵn trong dump có thể không được thực thi → luôn thêm `SET FOREIGN_KEY_CHECKS=0;` ở **đầu** file trước khi import.
-- Bảng import từ MySQL dump dùng collation `utf8mb4_0900_ai_ci`, còn bảng TiDB tự tạo mặc định `utf8mb4_bin`. Khóa ngoại giữa 2 cột khác collation → lỗi `3780 ... are incompatible`. `db.init_db()` đã tự lấy collation của `tickets.id` khi tạo `ticket_messages`.
+- Database `namgree` trên TiDB có collation mặc định `utf8mb4_unicode_ci`, còn các bảng import từ MySQL dump dùng `utf8mb4_0900_ai_ci`. TiDB vẫn kiểm tra khóa ngoại khi chạy `CREATE TABLE IF NOT EXISTS` với bảng **đã tồn tại** → lỗi `3780 ... are incompatible`. Vì vậy `db.init_db()` chỉ CREATE những bảng chưa có (kiểm tra bằng `SHOW TABLES`).
 - Sau khi import, kiểm tra: `SELECT COUNT(*) FROM tickets;` và `SELECT COUNT(*) FROM ticket_messages;`
 - Lệnh import mẫu: xem `cmd_run.txt` (mục TiDB Cloud).
 
 ### Sự cố 09/10/2026
-- App lỗi `3780` khi khởi động: bảng `ticket_messages` bị thiếu trên TiDB (lần import 08/10 không tắt khóa ngoại), app tự tạo lại thì lệch collation với `tickets`.
-- Đã sửa code (commit `3fd0289`). Dữ liệu tin nhắn cũ cần import lại từ `import_ticket_messages_20260924.sql` (tách từ `backup_railway_20260924.sql`).
+- App lỗi `3780` khi khởi động (tại `CREATE TABLE IF NOT EXISTS tickets`), dù dữ liệu trên TiDB đầy đủ (159 tickets, 182 tin nhắn, khớp backup 24/09).
+- Nguyên nhân: lệch collation giữa DB mặc định và bảng import (xem mục trên). Đã sửa `db.init_db()` để bỏ qua CREATE với bảng đã có.

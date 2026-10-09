@@ -43,9 +43,15 @@ def init_db():
     if not conn:
         return
     cursor = conn.cursor()
-    
+
+    # Chỉ CREATE bảng chưa có. TiDB vẫn kiểm tra khóa ngoại khi chạy CREATE TABLE IF NOT EXISTS
+    # với bảng đã tồn tại → lỗi 3780 vì DB mặc định utf8mb4_unicode_ci còn bảng import là utf8mb4_0900_ai_ci.
+    cursor.execute("SHOW TABLES")
+    existing_tables = {row[0] for row in cursor.fetchall()}
+
     # Create tickets table
-    cursor.execute("""
+    if 'tickets' not in existing_tables:
+        cursor.execute("""
         CREATE TABLE IF NOT EXISTS tickets (
             id VARCHAR(50) PRIMARY KEY,
             subject VARCHAR(255) NOT NULL,
@@ -53,7 +59,7 @@ def init_db():
             status VARCHAR(50) DEFAULT 'Mới tạo',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
-    """)
+        """)
     
     # Attempt to add form_type and form_data columns (will fail silently if they already exist)
     try:
@@ -75,7 +81,8 @@ def init_db():
     """)
     row = cursor.fetchone()
     id_collate = f"CHARACTER SET {row[0]} COLLATE {row[1]}" if row and row[0] else ""
-    cursor.execute(f"""
+    if 'ticket_messages' not in existing_tables:
+        cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS ticket_messages (
             id INT AUTO_INCREMENT PRIMARY KEY,
             ticket_id VARCHAR(50) {id_collate} NOT NULL,
@@ -85,10 +92,11 @@ def init_db():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
         )
-    """)
+        """)
     
     # Create tasks table (for Báo cáo tuần)
-    cursor.execute("""
+    if 'tasks' not in existing_tables:
+        cursor.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             id INT AUTO_INCREMENT PRIMARY KEY,
             ticket_id VARCHAR(50),
@@ -97,7 +105,7 @@ def init_db():
             status VARCHAR(50) DEFAULT 'Done',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
-    """)
+        """)
 
     # Bổ sung ticket_id cho DB đã tồn tại từ trước (sẽ lỗi âm thầm nếu cột đã có)
     try:
@@ -107,13 +115,14 @@ def init_db():
 
     # Bảng cấu hình chung (SMTP, lịch gửi báo cáo...) dạng key-value.
     # Lưu ở DB thay vì trong code vì repo là public.
-    cursor.execute("""
+    if 'app_settings' not in existing_tables:
+        cursor.execute("""
         CREATE TABLE IF NOT EXISTS app_settings (
             setting_key VARCHAR(100) PRIMARY KEY,
             setting_value TEXT,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         )
-    """)
+        """)
 
     conn.commit()
     cursor.close()
