@@ -67,10 +67,18 @@ def init_db():
         pass
     
     # Create ticket_messages table
+    # ticket_id phải cùng charset/collation với tickets.id, nếu không khóa ngoại lỗi 3780.
+    # (tickets import từ MySQL dump là utf8mb4_0900_ai_ci, còn TiDB mặc định utf8mb4_bin)
     cursor.execute("""
+        SELECT CHARACTER_SET_NAME, COLLATION_NAME FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'tickets' AND COLUMN_NAME = 'id'
+    """)
+    row = cursor.fetchone()
+    id_collate = f"CHARACTER SET {row[0]} COLLATE {row[1]}" if row and row[0] else ""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS ticket_messages (
             id INT AUTO_INCREMENT PRIMARY KEY,
-            ticket_id VARCHAR(50) NOT NULL,
+            ticket_id VARCHAR(50) {id_collate} NOT NULL,
             user VARCHAR(100) NOT NULL,
             msg TEXT NOT NULL,
             type VARCHAR(50) DEFAULT 'public',
