@@ -6,3 +6,4 @@
 - Giao diện (UI) sử dụng Streamlit: ưu tiên `st.sidebar` để điều hướng và `st.columns` để chia layout.
 - Ngôn ngữ giao diện: Tiếng Việt. Ngôn ngữ code: Tiếng Anh.
 - Luôn kiểm tra sự tồn tại của file trong `data/` và `assets/` trước khi đọc để tránh crash app.
+- TRƯỚC KHI XỬ LÝ: đọc `CLAUDE.md` (danh sách lỗi đã gặp với DB TiDB / Streamlit Cloud) và `CONTEXT.md`.
