@@ -21,7 +21,12 @@ except ImportError:
     DOCX_AVAILABLE = False
 
 # Khởi tạo database và bảng
-db.init_db()
+# Tự hiện lỗi vì Streamlit Cloud ẩn nội dung exception không bắt ("error message is redacted")
+try:
+    db.init_db()
+except Exception as e:
+    st.error(f"❌ Lỗi khởi tạo DB `{db.DB_CONFIG.get('host')}`: {type(e).__name__} — {e}")
+    st.stop()
 
 # -----------------
 # ADMIN AUTH CONFIG
