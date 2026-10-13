@@ -47,7 +47,7 @@ ADMIN_PASSWORD = _read_admin_password()
 
 def check_admin_password(password):
     if not ADMIN_PASSWORD:
-        st.error("Chưa cấu hình `ADMIN_PASSWORD` trong Streamlit Secrets.")
+        st.error("Chưa cấu hình `ADMIN_PASSWORD` trong Secrets (web: Manage app → Settings → Secrets; máy local: `.streamlit/secrets.toml`).")
         return False
     return hmac.compare_digest(password.encode("utf-8"), ADMIN_PASSWORD.encode("utf-8"))
 
@@ -1400,7 +1400,7 @@ if st.session_state.get("view_mode") == "only":
                     if check_admin_password(share_pw):
                         login_admin()
                         st.rerun()
-                    else:
+                    elif ADMIN_PASSWORD:
                         st.error("Sai mật khẩu.")
     else:
         st.error(f"❌ Không tìm thấy Ticket với mã yêu cầu `{url_ticket_id}` hoặc yêu cầu đã bị xóa vĩnh viễn khỏi hệ thống.")
@@ -1557,7 +1557,7 @@ with st.sidebar:
                 if check_admin_password(pw_input):
                     login_admin()
                     st.rerun()
-                else:
+                elif ADMIN_PASSWORD:
                     st.error("Sai mật khẩu!")
 
     st.markdown("---")
