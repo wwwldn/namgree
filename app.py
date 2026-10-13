@@ -175,6 +175,16 @@ STATUS_COLORS = {
     "Từ chối": "#6B7280",       # Xám
 }
 
+# Nhóm ghi chú công việc = 4 dòng trong bảng báo cáo tuần của file mẫu công ty
+# key: mã nhóm (trùng "domain" của FORM_CONFIGS) → (tên hiển thị, chữ để tìm dòng trong file mẫu)
+WORK_NOTE_CATEGORIES = {
+    "erp": ("ERP", "ERP"),
+    "warranty": ("Hệ thống Bảo hành", "HỆ THỐNG BẢO HÀNH"),
+    "gree_app": ("Gree App", "GREE APP"),
+    "it": ("IT cơ bản", "CÔNG VIỆC IT CƠ BẢN"),
+}
+WORK_NOTE_LABELS = {key: label for key, (label, _) in WORK_NOTE_CATEGORIES.items()}
+
 # Trạng thái coi như đã đóng — dùng để đẩy ticket chưa xong lên đầu danh sách
 CLOSED_STATUSES = {"Hoàn thành", "Từ chối"}
 
@@ -718,7 +728,7 @@ def week_date_range(year, month, week_no):
     saturday = monday + datetime.timedelta(days=5)
     return monday, saturday
 
-def build_report_context(year, month, week, reporter, tickets, tasks, manual_tasks="", issues=""):
+def build_report_context(year, month, week, reporter, tickets, tasks, notes=(), issues=""):
     """Dựng toàn bộ dữ liệu báo cáo tuần. Tách riêng khỏi UI để cả trang Báo cáo lẫn
     chức năng gửi email tự động đều dùng chung một nguồn số liệu."""
     start_date, end_date = week_date_range(year, month, week)
@@ -734,6 +744,11 @@ def build_report_context(year, month, week, reporter, tickets, tasks, manual_tas
         if to_date(task.get('created_at')) and start_date <= to_date(task.get('created_at')) <= end_date
     ]
     tickets_by_id = {t['id']: t for t in tickets}
+    # Ghi chú công việc ngoài ticket, theo ngày ghi chú
+    week_notes = [
+        n for n in notes
+        if to_date(n.get('note_date')) and start_date <= to_date(n.get('note_date')) <= end_date
+    ]
 
     summary_rows = []
     for cfg in FORM_CONFIGS:
@@ -778,7 +793,7 @@ def build_report_context(year, month, week, reporter, tickets, tasks, manual_tas
         ],
         "summary_rows": summary_rows,
         "completed_rows": completed_rows,
-        "manual_tasks": manual_tasks,
+        "week_notes": week_notes,
         "issues": issues,
         "week_relevant_tickets": week_relevant_tickets,
         "week_new_tickets": week_new_tickets,
@@ -867,7 +882,7 @@ def send_weekly_report_email(settings, tickets, tasks, target_date=None, mark_se
     ctx = build_report_context(
         year, month, week,
         settings.get("report_email_reporter") or Config.OWNER,
-        tickets, tasks,
+        tickets, tasks, db.get_work_notes(),
     )
 
     try:
@@ -1015,8 +1030,15 @@ def generate_weekly_report_docx(ctx):
     else:
         doc.add_paragraph("Không có ticket nào hoàn thành trong tuần này.")
 
-    doc.add_heading("4. Công việc bổ sung (nhập tay)", level=2)
-    doc.add_paragraph(ctx['manual_tasks'].strip() if ctx['manual_tasks'] else "(Không có)")
+    doc.add_heading("4. Công việc khác (ghi chú công việc)", level=2)
+    if not ctx['week_notes']:
+        doc.add_paragraph("(Không có)")
+    for category, label in WORK_NOTE_LABELS.items():
+        note_lines = build_note_lines([n for n in ctx['week_notes'] if n.get('category') == category])
+        if note_lines:
+            doc.add_paragraph().add_run(f"{label}:").bold = True
+            for text, _ in note_lines:
+                doc.add_paragraph(text)
 
     doc.add_heading("5. Vấn đề gặp phải / Lưu ý", level=2)
     doc.add_paragraph(ctx['issues'].strip() if ctx['issues'] else "(Không có)")
@@ -1059,8 +1081,29 @@ def build_domain_section_lines(tickets, domain):
         lines.append((f"{section_no}. {short_label}:", True))
         for t in sorted(form_tickets, key=lambda x: x.get('id') or ''):
             lines.append((build_ticket_report_line(t, cfg), False))
-    if not lines:
-        lines = [("Không có công việc nào trong tuần này.", False)]
+    return lines
+
+def build_note_lines(notes):
+    """Mỗi ghi chú → 1 hoặc nhiều dòng '- nội dung' (ghi chú nhiều dòng thì giữ nguyên xuống dòng)."""
+    lines = []
+    for note in notes:
+        for text in str(note.get("content") or "").splitlines():
+            text = text.strip()
+            if text:
+                lines.append((text if text.startswith(("-", "+", "•")) else f"- {text}", False))
+    return lines
+
+def build_report_row_lines(ctx, category):
+    """Nội dung cột 'Các công việc thực hiện' của 1 dòng báo cáo: ticket theo Form (như cũ)
+    + mục 'Công việc khác' lấy từ ghi chú công việc của nhóm đó."""
+    lines = build_domain_section_lines(ctx['week_relevant_tickets'], category)
+    category_notes = [n for n in ctx.get('week_notes', []) if n.get('category') == category]
+    note_lines = build_note_lines(category_notes)
+    if note_lines:
+        if lines:
+            section_no = sum(1 for _, bold in lines if bold) + 1
+            lines.append((f"{section_no}. Công việc khác:", True))
+        lines.extend(note_lines)
     return lines
 
 def set_cell_lines(cell, lines):
@@ -1183,8 +1226,8 @@ def update_all_rows_time(table, time_text):
 
 def generate_weekly_report_from_template(template_path, ctx):
     """Đổ dữ liệu vào ĐÚNG file mẫu công ty (giữ logo/layout/song ngữ/khung tự đánh giá...),
-    chỉ thay: tiêu đề tuần, tên người báo cáo, nội dung dòng HỆ THỐNG BẢO HÀNH + ERP, cột T/g giải quyết
-    của cả 4 dòng, và cột Ghi chú (thời gian) của bảng Kế hoạch công việc tuần sau."""
+    chỉ thay: tiêu đề tuần, tên người báo cáo, cột 'Các công việc thực hiện' của 4 dòng (ticket + ghi chú
+    công việc), cột T/g giải quyết của cả 4 dòng, và cột Ghi chú (thời gian) của bảng Kế hoạch công việc tuần sau."""
     doc = Document(template_path)
 
     update_title_paragraphs(doc, ctx['week'], ctx['month'], ctx['year'], ctx['reporter'])
@@ -1193,23 +1236,22 @@ def generate_weekly_report_from_template(template_path, ctx):
     if table is None:
         raise ValueError("Không tìm thấy bảng có cột 'Các công việc thực hiện' trong file mẫu.")
 
-    row = find_row_by_content(table, "HỆ THỐNG BẢO HÀNH")
-    if row is None:
+    if find_row_by_content(table, "HỆ THỐNG BẢO HÀNH") is None:
         raise ValueError("Không tìm thấy dòng 'HỆ THỐNG BẢO HÀNH' trong file mẫu.")
 
     header_cells = [c.text.strip() for c in table.rows[0].cells]
     content_idx = header_cells.index("Các công việc thực hiện")
-    set_cell_lines(row.cells[content_idx], build_domain_section_lines(ctx['week_relevant_tickets'], "warranty"))
-
-    # Mục "1. ERP" — best-effort: nếu file mẫu không có dòng này thì bỏ qua, không raise lỗi
-    erp_row = find_row_by_content(table, "ERP")
-    if erp_row is not None:
-        set_cell_lines(erp_row.cells[content_idx], build_domain_section_lines(ctx['week_relevant_tickets'], "erp"))
-
-    # Mục "3. GREE APP" — best-effort tương tự
-    gree_app_row = find_row_by_content(table, "GREE APP")
-    if gree_app_row is not None:
-        set_cell_lines(gree_app_row.cells[content_idx], build_domain_section_lines(ctx['week_relevant_tickets'], "gree_app"))
+    for category, (_, row_keyword) in WORK_NOTE_CATEGORIES.items():
+        # Dòng nào file mẫu không có thì bỏ qua, không raise lỗi
+        row = find_row_by_content(table, row_keyword)
+        if row is None:
+            continue
+        lines = build_report_row_lines(ctx, category)
+        if lines:
+            set_cell_lines(row.cells[content_idx], lines)
+        elif category != "it":
+            # Dòng IT cơ bản không có ghi chú thì giữ nguyên nội dung mặc định của file mẫu
+            set_cell_lines(row.cells[content_idx], [("Không có công việc nào trong tuần này.", False)])
 
     time_text = f"{ctx['start_date'].strftime('%d/%m')}-{ctx['end_date'].strftime('%d/%m')}/{ctx['end_date'].year}"
     update_all_rows_time(table, time_text)
@@ -1371,6 +1413,82 @@ if st.session_state.get("view_mode") == "only":
     st.stop()
 
 # -----------------
+# GHI CHÚ CÔNG VIỆC NGOÀI TICKET
+# -----------------
+def _save_quick_note():
+    """Callback chạy trước lần chạy lại → được phép xóa ô nội dung sau khi lưu."""
+    content = st.session_state.get("quick_note_content", "").strip()
+    if not content:
+        st.session_state["_quick_note_msg"] = ("warning", "Chưa nhập nội dung.")
+        return
+    category = st.session_state["quick_note_category"]
+    db.add_work_note(st.session_state["quick_note_date"], category, content)
+    st.session_state["quick_note_content"] = ""
+    st.session_state["_quick_note_msg"] = ("toast", f"Đã lưu ghi chú ({WORK_NOTE_LABELS[category]})")
+
+def render_quick_note_form():
+    """Ô ghi chú nhanh ở sidebar: chọn nhóm + 1 đoạn nội dung tổng quan. Nhóm giữ nguyên lựa chọn trước."""
+    with st.form("quick_note_form", border=False):
+        st.selectbox("Nhóm", list(WORK_NOTE_LABELS), format_func=WORK_NOTE_LABELS.get, key="quick_note_category")
+        st.date_input("Ngày", value=now_vn().date(), format="DD/MM/YYYY", key="quick_note_date")
+        st.text_area("Nội dung", height=90, placeholder="VD: Họp ASoft chốt quy trình nhập kho", key="quick_note_content")
+        st.form_submit_button("💾 Lưu ghi chú", width="stretch", on_click=_save_quick_note)
+    msg = st.session_state.pop("_quick_note_msg", None)
+    if msg and msg[0] == "toast":
+        st.toast(msg[1])
+    elif msg:
+        st.warning(msg[1])
+
+def render_work_notes_editor(week_notes, start_date, end_date):
+    """Bảng sửa/xóa/thêm ghi chú của tuần đang xem trên trang Báo cáo."""
+    label_to_key = {label: key for key, label in WORK_NOTE_LABELS.items()}
+    original = pd.DataFrame(
+        [
+            {"id": n["id"], "Ngày": to_date(n["note_date"]),
+             "Nhóm": WORK_NOTE_LABELS.get(n["category"], n["category"]), "Nội dung": n["content"]}
+            for n in week_notes
+        ],
+        columns=["id", "Ngày", "Nhóm", "Nội dung"],
+    )
+    # Đổi key sau mỗi lần Lưu để bảng nạp lại dữ liệu mới thay vì giữ chỉnh sửa cũ
+    version = st.session_state.get("_notes_editor_version", 0)
+    edited = st.data_editor(
+        original,
+        key=f"notes_editor_{start_date}_{version}",
+        num_rows="dynamic",
+        hide_index=True,
+        width="stretch",
+        column_order=["Ngày", "Nhóm", "Nội dung"],
+        column_config={
+            "Ngày": st.column_config.DateColumn("Ngày", format="DD/MM/YYYY", default=min(max(now_vn().date(), start_date), end_date), required=True),
+            "Nhóm": st.column_config.SelectboxColumn("Nhóm", options=list(label_to_key), required=True),
+            "Nội dung": st.column_config.TextColumn("Nội dung", width="large", required=True),
+        },
+    )
+    if st.button("💾 Lưu thay đổi ghi chú", key="btn_save_notes"):
+        original_by_id = {int(r["id"]): r for r in original.to_dict("records")}
+        kept_ids, updated = set(), []
+        for row in edited.to_dict("records"):
+            content = str(row.get("Nội dung") or "").strip()
+            if not content or not row.get("Nhóm"):
+                continue
+            # Ô ngày trả về có thể là date / Timestamp / chuỗi tùy thao tác → chuẩn hóa về date
+            note_date = to_date(row.get("Ngày")) or now_vn().date()
+            note = {"note_date": note_date, "category": label_to_key[row["Nhóm"]], "content": content}
+            if pd.isna(row.get("id")):
+                db.add_work_note(note["note_date"], note["category"], note["content"])
+                continue
+            note["id"] = int(row["id"])
+            kept_ids.add(note["id"])
+            old = original_by_id[note["id"]]
+            if (old["Ngày"], old["Nhóm"], old["Nội dung"]) != (note_date, row["Nhóm"], content):
+                updated.append(note)
+        deleted_ids = [note_id for note_id in original_by_id if note_id not in kept_ids]
+        db.save_work_note_changes(updated, deleted_ids)
+        st.session_state["_notes_editor_version"] = version + 1
+        st.rerun()
+
+# -----------------
 # THANH ĐIỀU HƯỚNG (SIDEBAR)
 # -----------------
 # -----------------
@@ -1430,6 +1548,8 @@ with st.sidebar:
         if st.button("🚪 Đăng xuất", use_container_width=True, key="btn_logout"):
             logout_admin()
             st.rerun()
+        with st.expander("📝 Ghi chú công việc nhanh"):
+            render_quick_note_form()
     else:
         with st.expander("🔐 Admin Login"):
             pw_input = st.text_input("Mật khẩu", type="password", key="admin_pw_input")
@@ -2118,7 +2238,7 @@ elif page == "📈 Báo cáo tuần của Nam":
     )
 
     # Số liệu báo cáo dựng bằng hàm dùng chung với chức năng gửi email tự động
-    base_ctx = build_report_context(report_year, report_month, report_week, reporter_name, db_tickets, db_tasks)
+    base_ctx = build_report_context(report_year, report_month, report_week, reporter_name, db_tickets, db_tasks, db.get_work_notes())
     week_new_tickets = base_ctx["week_new_tickets"]
     week_completed_tasks = base_ctx["week_completed_tasks"]
     summary_rows = base_ctx["summary_rows"]
@@ -2151,8 +2271,13 @@ elif page == "📈 Báo cáo tuần của Nam":
     )
 
     st.divider()
-    st.subheader("📝 Bổ sung nội dung báo cáo (nhập tay)")
-    manual_tasks = st.text_area("Công việc khác ngoài hệ thống ticket", placeholder="Những việc đã làm nhưng chưa tạo ticket...")
+    st.subheader("📝 Ghi chú công việc ngoài ticket")
+    st.caption(
+        "Ghi tổng quan việc đã làm/đang follow — mỗi dòng sẽ thành '- nội dung' trong mục 'Công việc khác' "
+        "của đúng dòng ERP / Bảo hành / Gree App / IT cơ bản trong file mẫu. Ghi nhanh hằng ngày ở sidebar, "
+        "hoặc thêm/sửa/xóa trực tiếp trong bảng dưới rồi bấm Lưu."
+    )
+    render_work_notes_editor(base_ctx["week_notes"], start_date, end_date)
     issues = st.text_area("Vấn đề gặp phải / Rủi ro cần lưu ý", placeholder="Nhập các vấn đề nếu có...")
 
     st.divider()
@@ -2160,7 +2285,7 @@ elif page == "📈 Báo cáo tuần của Nam":
         st.error("Chưa cài thư viện `python-docx`. Vui lòng chạy `pip install python-docx` rồi khởi động lại app để dùng tính năng xuất Word.")
     else:
         # Bổ sung phần nhập tay vào ngữ cảnh đã dựng ở trên
-        report_ctx = dict(base_ctx, manual_tasks=manual_tasks, issues=issues)
+        report_ctx = dict(base_ctx, issues=issues)
 
         exp_col1, exp_col2 = st.columns(2)
         with exp_col1:

@@ -156,6 +156,18 @@ def init_db():
         )
         """)
 
+    # Ghi chú công việc ngoài ticket (việc tự follow/xử lý) → đổ vào báo cáo tuần theo nhóm
+    if 'work_notes' not in existing_tables:
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS work_notes (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            note_date DATE NOT NULL,
+            category VARCHAR(30) NOT NULL,
+            content TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
     conn.commit()
     cursor.close()
     conn.close()
@@ -376,3 +388,46 @@ def update_ticket_data(ticket_id, subject, requester, form_data):
     get_all_tickets.clear()
     return True
 
+
+@st.cache_data(ttl=30)
+def get_work_notes():
+    conn = get_connection()
+    if not conn: return []
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM work_notes ORDER BY note_date, id")
+    notes = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return notes
+
+def add_work_note(note_date, category, content):
+    conn = get_connection()
+    if not conn: return False
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO work_notes (note_date, category, content) VALUES (%s, %s, %s)",
+        (note_date, category, content)
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+    get_work_notes.clear()
+    return True
+
+def save_work_note_changes(updated, deleted_ids):
+    """Lưu chỉnh sửa từ bảng trên trang Báo cáo. updated: list dict (id, note_date, category, content)."""
+    conn = get_connection()
+    if not conn: return False
+    cursor = conn.cursor()
+    for note in updated:
+        cursor.execute(
+            "UPDATE work_notes SET note_date = %s, category = %s, content = %s WHERE id = %s",
+            (note['note_date'], note['category'], note['content'], note['id'])
+        )
+    for note_id in deleted_ids:
+        cursor.execute("DELETE FROM work_notes WHERE id = %s", (note_id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    get_work_notes.clear()
+    return True

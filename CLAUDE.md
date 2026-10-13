@@ -21,5 +21,6 @@
 - Repo là **public**: không commit mật khẩu, `secrets.toml`, file backup `.sql` có dữ liệu thật. `cmd_run.txt` hiện còn mật khẩu Railway — không commit file này.
 - Secrets cần có: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASS`, `DB_NAME`, `ADMIN_PASSWORD`.
 - Đổi trạng thái ticket chỉ qua `db.update_ticket_status()` / `db.complete_ticket()` — hai hàm này ghi `closed_at` và dòng log `type='status'`. Không UPDATE `tickets.status` trực tiếp.
+- Báo cáo tuần = ticket (theo Form/domain) + bảng `work_notes` (ghi chú việc ngoài ticket, nhóm `erp`/`warranty`/`gree_app`/`it` ↔ 4 dòng file mẫu, xem `WORK_NOTE_CATEGORIES` trong `app.py`). Ticket chỉ dùng thống kê yêu cầu online — không tạo ticket cho việc tự follow.
 - Code mới gọi DB: dùng `get_connection()` trong `db.py`, xử lý trường hợp trả về `None`; sau khi ghi dữ liệu gọi `.clear()` cache tương ứng (`get_all_tickets`, `get_tasks`, `get_settings`). `get_connection()` lấy từ pool → luôn `conn.close()` để trả kết nối.
 - Khi gặp lỗi mới: thêm vào mục "Lỗi đã gặp" ở trên (ngày, thông báo lỗi, nguyên nhân, cách sửa).
