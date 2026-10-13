@@ -26,7 +26,7 @@ Xây dựng công cụ cá nhân hóa để quản lý công việc tại **Gree
 - **Production:** Streamlit Cloud — `https://namgree.streamlit.app/`, tự deploy khi push lên nhánh `main`.
 - **Database (từ 08/10/2026):** TiDB Cloud Serverless — host `gateway01.ap-southeast-1.prod.aws.tidbcloud.com`, port `4000`, bắt buộc SSL, user dạng `xxxxxxxx.root`.
   - Trước đó dùng MySQL trên Railway (đã ngừng, không kết nối được nữa).
-- **Thông tin đăng nhập DB:** chỉ để trong Streamlit Cloud > Settings > Secrets (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASS`, `DB_NAME`).
+- **Thông tin đăng nhập DB & mật khẩu Admin:** chỉ để trong Streamlit Cloud > Settings > Secrets (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASS`, `DB_NAME`, `ADMIN_PASSWORD`).
   - Ở máy local: `.streamlit/secrets.toml` (đã có trong `.gitignore`). Không có file này thì `db.py` dùng MySQL localhost.
   - Repo là public → **không** ghi mật khẩu vào code, `cmd_run.txt` hay file `.md`.
 - **Lỗi DB trên web:** Streamlit Cloud ẩn nội dung exception ("error message is redacted"), nên `app.py` bọc `db.init_db()` trong try/except để hiện lỗi thật bằng `st.error`. Xem thêm log tại "Manage app".

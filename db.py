@@ -1,5 +1,5 @@
 import mysql.connector
-from mysql.connector import Error
+from mysql.connector import Error, pooling
 import datetime
 import json
 
@@ -26,11 +26,30 @@ except Exception as e:
     }
 
 
+# Trạng thái coi như đã đóng (ghi closed_at)
+CLOSED_STATUSES = ("Hoàn thành", "Từ chối")
+# Mã ticket tạo theo giờ Việt Nam (đổi tháng đúng lúc 0h VN)
+VN_TZ = datetime.timezone(datetime.timedelta(hours=7))
+
+
+@st.cache_resource
+def _get_pool():
+    # Giữ sẵn kết nối: mỗi lần mở kết nối SSL mới tới TiDB (Singapore) mất vài trăm ms
+    return pooling.MySQLConnectionPool(pool_name="namgree", pool_size=5, **DB_CONFIG)
+
+
 def get_connection():
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        if conn.is_connected():
+        try:
+            conn = _get_pool().get_connection()
+            # TiDB Serverless tự cắt kết nối rảnh lâu → ping để nối lại trước khi dùng
+            conn.ping(reconnect=True, attempts=2, delay=0)
             return conn
+        except pooling.PoolError:
+            # Hết kết nối rảnh trong pool → mở kết nối riêng như trước
+            conn = mysql.connector.connect(**DB_CONFIG)
+            if conn.is_connected():
+                return conn
     except Error as e:
         print(f"Error connecting to MySQL: {e}")
         # Hiện lỗi lên web — trước đây chỉ print nên trang trống mà không ai biết vì sao
@@ -71,6 +90,19 @@ def init_db():
         cursor.execute("ALTER TABLE tickets ADD COLUMN form_data JSON")
     except Error:
         pass
+
+    # closed_at: thời điểm Hoàn thành/Từ chối → tính thời gian xử lý
+    cursor.execute("SHOW COLUMNS FROM tickets LIKE 'closed_at'")
+    if not cursor.fetchall():
+        cursor.execute("ALTER TABLE tickets ADD COLUMN closed_at DATETIME NULL")
+        # Ticket đã đóng từ trước: lấy mốc ghi nhận task, không có thì lấy tin nhắn cuối
+        cursor.execute("""
+            UPDATE tickets t SET closed_at = COALESCE(
+                (SELECT MAX(k.created_at) FROM tasks k WHERE k.ticket_id = t.id),
+                (SELECT MAX(m.created_at) FROM ticket_messages m WHERE m.ticket_id = t.id),
+                t.created_at)
+            WHERE t.status IN ('Hoàn thành', 'Từ chối')
+        """)
     
     # Create ticket_messages table
     # ticket_id phải cùng charset/collation với tickets.id, nếu không khóa ngoại lỗi 3780.
@@ -156,15 +188,52 @@ def get_all_tickets():
     conn.close()
     return tickets
 
-def create_ticket(ticket_id, subject, requester, form_type=None, form_data=None, status='Mới tạo'):
+def _next_ticket_id(cursor):
+    """Mã ticket tăng dần theo tháng: GREE-IT_YYYYMM_001, _002...
+    Trước đây dùng số ngẫu nhiên 100-999 nên dễ trùng khi một tháng có vài chục ticket."""
+    prefix = f"GREE-IT_{datetime.datetime.now(VN_TZ):%Y%m}_"
+    cursor.execute("SELECT id FROM tickets WHERE id LIKE %s", (prefix.replace("_", r"\_") + "%",))
+    numbers = [int(row[0][len(prefix):]) for row in cursor.fetchall() if row[0][len(prefix):].isdigit()]
+    return f"{prefix}{max(numbers, default=0) + 1:03d}"
+
+def _set_status(cursor, ticket_id, new_status, changed_by):
+    """Đổi trạng thái và ghi 1 dòng log 'cũ → mới' (type='status') để biết ai đổi, lúc nào.
+    Trả về False nếu trạng thái không đổi."""
+    cursor.execute("SELECT status FROM tickets WHERE id = %s", (ticket_id,))
+    row = cursor.fetchone()
+    if not row or row[0] == new_status:
+        return False
+    if new_status in CLOSED_STATUSES:
+        cursor.execute("UPDATE tickets SET status = %s, closed_at = NOW() WHERE id = %s", (new_status, ticket_id))
+    else:
+        cursor.execute("UPDATE tickets SET status = %s, closed_at = NULL WHERE id = %s", (new_status, ticket_id))
+    cursor.execute(
+        "INSERT INTO ticket_messages (ticket_id, user, msg, type) VALUES (%s, %s, %s, 'status')",
+        (ticket_id, changed_by, f"Trạng thái: {row[0]} → {new_status}")
+    )
+    return True
+
+def create_ticket(subject, requester, form_type=None, form_data=None, status='Mới tạo'):
+    """Tạo ticket mới, trả về mã ticket (None nếu lỗi kết nối)."""
     conn = get_connection()
-    if not conn: return False
+    if not conn: return None
     cursor = conn.cursor()
     form_data_str = json.dumps(form_data, ensure_ascii=False) if form_data else None
-    cursor.execute(
-        "INSERT INTO tickets (id, subject, requester, status, form_type, form_data) VALUES (%s, %s, %s, %s, %s, %s)",
-        (ticket_id, subject, requester, status, form_type, form_data_str)
-    )
+    ticket_id = None
+    # Thử lại nếu 2 người tạo ticket cùng lúc và lấy trùng số
+    for attempt in range(3):
+        ticket_id = _next_ticket_id(cursor)
+        try:
+            cursor.execute(
+                "INSERT INTO tickets (id, subject, requester, status, form_type, form_data, closed_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, IF(%s, NOW(), NULL))",
+                (ticket_id, subject, requester, status, form_type, form_data_str, status in CLOSED_STATUSES)
+            )
+            break
+        except mysql.connector.IntegrityError:
+            conn.rollback()
+            if attempt == 2:
+                raise
     # Thêm message đầu tiên
     cursor.execute(
         "INSERT INTO ticket_messages (ticket_id, user, msg, type) VALUES (%s, %s, %s, 'public')",
@@ -181,9 +250,12 @@ def create_ticket(ticket_id, subject, requester, form_type=None, form_data=None,
     cursor.close()
     conn.close()
     get_all_tickets.clear()
-    return True
+    get_tasks.clear()
+    return ticket_id
 
-def add_ticket_message(ticket_id, user, msg, msg_type):
+def add_ticket_message(ticket_id, user, msg, msg_type, from_admin=False):
+    """from_admin: do code truyền vào (đã kiểm tra đăng nhập), không suy ra từ tên người gửi
+    — khách có thể tự đặt tên bắt đầu bằng 'Admin'."""
     conn = get_connection()
     if not conn: return False
     cursor = conn.cursor()
@@ -191,10 +263,13 @@ def add_ticket_message(ticket_id, user, msg, msg_type):
         "INSERT INTO ticket_messages (ticket_id, user, msg, type) VALUES (%s, %s, %s, %s)",
         (ticket_id, user, msg, msg_type)
     )
-    
+
     # Nếu đang 'Mới tạo' thì đổi thành 'Đã tiếp nhận' khi Admin phản hồi
-    if user.startswith('Admin'):
-        cursor.execute("UPDATE tickets SET status = 'Đã tiếp nhận' WHERE id = %s AND status = 'Mới tạo'", (ticket_id,))
+    if from_admin:
+        cursor.execute("SELECT status FROM tickets WHERE id = %s", (ticket_id,))
+        row = cursor.fetchone()
+        if row and row[0] == 'Mới tạo':
+            _set_status(cursor, ticket_id, 'Đã tiếp nhận', user)
 
     conn.commit()
     cursor.close()
@@ -202,11 +277,14 @@ def add_ticket_message(ticket_id, user, msg, msg_type):
     get_all_tickets.clear()
     return True
 
-def complete_ticket(ticket_id, subject, log_msg):
+def complete_ticket(ticket_id, subject, log_msg, changed_by="Admin"):
     conn = get_connection()
     if not conn: return False
     cursor = conn.cursor()
-    cursor.execute("UPDATE tickets SET status = 'Hoàn thành' WHERE id = %s", (ticket_id,))
+    _set_status(cursor, ticket_id, 'Hoàn thành', changed_by)
+    # Mỗi ticket chỉ giữ 1 dòng trong tasks: hoàn thành lại (sau khi mở lại) hoặc bấm 2 lần
+    # trước đây tạo dòng trùng → báo cáo tuần đếm 2 lần.
+    cursor.execute("DELETE FROM tasks WHERE ticket_id = %s", (ticket_id,))
     cursor.execute(
         "INSERT INTO tasks (ticket_id, content, action, status) VALUES (%s, %s, %s, 'Done')",
         (ticket_id, subject, log_msg)
@@ -215,8 +293,10 @@ def complete_ticket(ticket_id, subject, log_msg):
     cursor.close()
     conn.close()
     get_all_tickets.clear()
+    get_tasks.clear()
     return True
 
+@st.cache_data(ttl=30)
 def get_tasks():
     conn = get_connection()
     if not conn: return []
@@ -227,12 +307,12 @@ def get_tasks():
     conn.close()
     return tasks
 
-def update_ticket_status(ticket_id, new_status):
-    """Cập nhật trạng thái ticket theo luồng chuẩn."""
+def update_ticket_status(ticket_id, new_status, changed_by="Admin"):
+    """Cập nhật trạng thái ticket theo luồng chuẩn (có ghi log thay đổi)."""
     conn = get_connection()
     if not conn: return False
     cursor = conn.cursor()
-    cursor.execute("UPDATE tickets SET status = %s WHERE id = %s", (new_status, ticket_id))
+    _set_status(cursor, ticket_id, new_status, changed_by)
     conn.commit()
     cursor.close()
     conn.close()

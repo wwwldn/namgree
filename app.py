@@ -3,8 +3,8 @@ import pandas as pd
 import json
 import os
 import datetime
-import random
 import secrets
+import hmac
 import calendar
 import io
 import re
@@ -32,7 +32,24 @@ except Exception as e:
 # ADMIN AUTH CONFIG
 # -----------------
 ADMIN_USERNAME = "NamIT"
-ADMIN_PASSWORD = "gree@2025"  # Đổi password tại đây
+# Tên hiển thị trên log xử lý của Admin
+ADMIN_DISPLAY_NAME = "Admin Nam"
+
+def _read_admin_password():
+    """Mật khẩu Admin đặt trong Streamlit Secrets (ADMIN_PASSWORD) — repo public nên không ghi trong code."""
+    try:
+        password = st.secrets.get("ADMIN_PASSWORD")
+    except Exception:
+        password = None
+    return str(password or os.environ.get("ADMIN_PASSWORD", ""))
+
+ADMIN_PASSWORD = _read_admin_password()
+
+def check_admin_password(password):
+    if not ADMIN_PASSWORD:
+        st.error("Chưa cấu hình `ADMIN_PASSWORD` trong Streamlit Secrets.")
+        return False
+    return hmac.compare_digest(password.encode("utf-8"), ADMIN_PASSWORD.encode("utf-8"))
 
 def is_admin() -> bool:
     return st.session_state.get("is_admin", False)
@@ -174,6 +191,60 @@ def sort_tickets_for_display(tickets):
         return (t.get("status") in CLOSED_STATUSES, -timestamp)
     return sorted(tickets, key=sort_key)
 
+def days_open(ticket):
+    """Số ngày ticket đã mở (tính tới lúc đóng nếu đã đóng). created_at/closed_at lưu theo giờ UTC của DB."""
+    created = ticket.get("created_at")
+    if not isinstance(created, datetime.datetime):
+        return None
+    end = ticket.get("closed_at") or datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    return max((end - created).days, 0)
+
+# Ticket chưa đóng mở quá số ngày này thì đánh dấu đỏ
+AGING_WARN_DAYS = 3
+
+def aging_label(ticket):
+    d = days_open(ticket)
+    if d is None:
+        return "—"
+    if ticket.get("status") not in CLOSED_STATUSES and d >= AGING_WARN_DAYS:
+        return f"🔴 {d} ngày"
+    return f"{d} ngày"
+
+# Bảng dữ liệu không tô màu được như badge → dùng chấm màu tương ứng STATUS_COLORS
+STATUS_ICONS = {
+    "Mới tạo": "🔵", "Đã tiếp nhận": "🟣", "Đang xử lý": "🟠",
+    "Chờ xử lý": "🔴", "Hoàn thành": "🟢", "Từ chối": "⚪",
+}
+
+def ticket_table_rows(tickets):
+    return [
+        {
+            "Mã Ticket": t["id"],
+            "Trạng thái": f"{STATUS_ICONS.get(t['status'], '⚪')} {t['status']}",
+            "Người y/c": t.get("requester") or "—",
+            "Tiêu đề": t.get("subject") or "—",
+            "Ngày tạo": format_ticket_date(t.get("created_at")),
+            "Đã mở": aging_label(t),
+        }
+        for t in tickets
+    ]
+
+def render_ticket_messages(msgs, show_internal):
+    """Vẽ chat-log của ticket. Dòng đổi trạng thái (type='status') hiện gọn 1 dòng."""
+    for m in msgs:
+        if m['type'] == "internal" and not show_internal:
+            continue
+        when = f"{m.get('date', '')} • {m.get('time', '')}"
+        if m['type'] == "status":
+            st.caption(f"🔄 {m['msg']} — {m['user']} • {when}")
+            continue
+        is_admin_msg = m['user'].startswith("Admin")
+        with st.chat_message("assistant" if is_admin_msg else "user"):
+            label = "🔒 Nội bộ" if m['type'] == "internal" else "🌐 Công khai"
+            st.write(f"**{m['user']}** ({label})")
+            st.write(m['msg'])
+            st.caption(when)
+
 st.markdown("""
 <style>
     .main-header {
@@ -208,11 +279,6 @@ url_ticket_id = st.query_params.get("ticket")
 if url_ticket_id and st.session_state.get("view_mode") != "full":
     st.session_state["view_mode"] = "only"
     st.session_state["active_ticket_id"] = url_ticket_id
-
-# Hàm sinh mã Ticket tự động
-def gen_ticket_id():
-    now = datetime.datetime.now()
-    return f"GREE-IT_{now.strftime('%Y%m')}_{random.randint(100, 999)}"
 
 FORM_CONFIGS = [
     {
@@ -1229,18 +1295,8 @@ if st.session_state.get("view_mode") == "only":
         st.markdown("---")
         st.markdown("#### 💬 Lịch sử trao đổi & Xử lý (Chat-log)")
         
-        # Vẽ các tin nhắn
-        for m in target_t['msgs']:
-            is_admin_msg = m['user'].startswith("Admin")
-            # Trong chế độ guest, ẩn log nội bộ để bảo mật!
-            if m['type'] == "internal":
-                continue
-            with st.chat_message("assistant" if is_admin_msg else "user"):
-                label = "🔒 Nội bộ" if m['type'] == "internal" else "🌐 Công khai"
-                st.write(f"**{m['user']}** ({label})")
-                st.write(m['msg'])
-                # Hiển thị ngày và giờ cùng nhau
-                st.caption(f"{m.get('date', '')} • {m.get('time', '')}")
+        # Trong chế độ guest, ẩn log nội bộ để bảo mật!
+        render_ticket_messages(target_t['msgs'], show_internal=False)
 
         # Gửi log mới (chỉ cho phép Công khai trong chế độ Guest)
         st.divider()
@@ -1249,7 +1305,10 @@ if st.session_state.get("view_mode") == "only":
         guest_msg = st.text_area("Nội dung phản hồi...", height=80, key="guest_msg_val")
 
         if st.button("📩 Gửi phản hồi", use_container_width=True, key="btn_guest_send"):
-            if guest_msg and guest_name:
+            if guest_name.strip().startswith("Admin") and not is_admin():
+                # Tên bắt đầu bằng "Admin" sẽ hiện như phản hồi của Admin
+                st.warning("Tên người gửi không được bắt đầu bằng 'Admin'.")
+            elif guest_msg and guest_name:
                 db.add_ticket_message(target_t['id'], guest_name, guest_msg, "public")
                 st.success("Đã gửi phản hồi thành công!")
                 st.rerun()
@@ -1282,10 +1341,11 @@ if st.session_state.get("view_mode") == "only":
                         target_t['id'],
                         target_t['subject'],
                         share_log.strip() or "Admin đã đánh dấu hoàn thành",
+                        changed_by=ADMIN_DISPLAY_NAME,
                     )
                     st.rerun()
                 else:
-                    db.update_ticket_status(target_t['id'], share_status)
+                    db.update_ticket_status(target_t['id'], share_status, changed_by=ADMIN_DISPLAY_NAME)
                     st.rerun()
             if col_out.button("🚪 Thoát Admin", use_container_width=True, key="btn_share_logout"):
                 logout_admin()
@@ -1295,7 +1355,7 @@ if st.session_state.get("view_mode") == "only":
                 st.caption(f"Đăng nhập một lần, ghi nhớ {ADMIN_SESSION_DAYS} ngày trên trình duyệt này.")
                 share_pw = st.text_input("Mật khẩu", type="password", key="share_admin_pw")
                 if st.button("Đăng nhập", use_container_width=True, key="btn_share_login"):
-                    if share_pw == ADMIN_PASSWORD:
+                    if check_admin_password(share_pw):
                         login_admin()
                         st.rerun()
                     else:
@@ -1374,7 +1434,7 @@ with st.sidebar:
         with st.expander("🔐 Admin Login"):
             pw_input = st.text_input("Mật khẩu", type="password", key="admin_pw_input")
             if st.button("Đăng nhập", use_container_width=True, key="btn_admin_login"):
-                if pw_input == ADMIN_PASSWORD:
+                if check_admin_password(pw_input):
                     login_admin()
                     st.rerun()
                 else:
@@ -1673,14 +1733,14 @@ def render_ticket_domain_page(state_key, main_title, subtitle, domain_forms, sho
                 elif general_missing:
                     st.warning("Vui lòng nhập đủ thông tin: " + ", ".join(general_missing))
                 elif t_user:
-                    new_id = gen_ticket_id()
                     form_type = form_choice_type
                     status = "Hoàn thành" if form_choice_type == "Admin_Web_Noted_Log_Ho_Tro" else "Mới tạo"
                     subject = form_choice
                     if form_choice_type in GENERAL_FORM_TYPES and str(form_data.get('request_title') or "").strip():
                         subject = form_data['request_title']
 
-                    if db.create_ticket(new_id, subject, t_user, form_type, form_data, status):
+                    new_id = db.create_ticket(subject, t_user, form_type, form_data, status)
+                    if new_id:
                         st.success(f"Đã tạo Ticket: {new_id}")
                         st.session_state[show_key] = False
                         st.rerun()
@@ -1732,7 +1792,7 @@ def render_ticket_domain_page(state_key, main_title, subtitle, domain_forms, sho
 
         st.divider()
 
-    col_list, col_detail = st.columns([0.4, 0.6])
+    col_list, col_detail = st.columns([0.45, 0.55])
     active_key = f"active_ticket_id_{state_key}"
 
     with col_list:
@@ -1756,14 +1816,28 @@ def render_ticket_domain_page(state_key, main_title, subtitle, domain_forms, sho
 
         if not filtered_tickets:
             st.info("Không có ticket nào trong phạm vi đang chọn.")
-
-        for t in filtered_tickets:
-            with st.container(border=True):
-                badge_html = status_badge(t['status'])
-                st.markdown(f"**{t['id']}** &nbsp; {badge_html}", unsafe_allow_html=True)
-                st.caption(f"Từ: {t['requester']} - {t['subject']}")
-                if st.button("Xem chi tiết", key=f"btn_{state_key}_{t['id']}"):
-                    st.session_state[active_key] = t["id"]
+        else:
+            # 1 bảng thay cho mỗi ticket 1 khung + 1 nút (trước đây ~100 widget/trang nên rất chậm)
+            st.caption("Bấm vào ô đầu dòng để xem chi tiết ticket.")
+            table_ids = [t["id"] for t in filtered_tickets]
+            event = st.dataframe(
+                pd.DataFrame(ticket_table_rows(filtered_tickets)),
+                # Key đổi khi danh sách/thứ tự đổi → bỏ dòng đang chọn cũ, tránh chỉ số dòng trỏ nhầm ticket khác
+                key=f"ticket_table_{state_key}_{hash(tuple(table_ids))}",
+                on_select="rerun",
+                selection_mode="single-row",
+                hide_index=True,
+                width="stretch",
+                height=min(38 + 35 * len(table_ids), 600),
+            )
+            selected_rows = event.selection.rows
+            selected_id = table_ids[selected_rows[0]] if selected_rows else None
+            # Chỉ áp dụng khi người dùng vừa chọn dòng khác, để không ghi đè ticket mở từ trang chủ
+            last_key = f"_last_table_selection_{state_key}"
+            if selected_id != st.session_state.get(last_key):
+                st.session_state[last_key] = selected_id
+                if selected_id:
+                    st.session_state[active_key] = selected_id
 
     with col_detail:
         st.subheader("💬 Luồng xử lý (Chat-log)")
@@ -1773,7 +1847,11 @@ def render_ticket_domain_page(state_key, main_title, subtitle, domain_forms, sho
             st.info("Ticket đang chọn không thuộc Form/phạm vi hiện tại. Hãy chọn ticket bên trái.")
         elif active_candidates:
             current_t = active_candidates[0]
-
+            st.markdown(
+                f"**{current_t['id']}** &nbsp; {status_badge(current_t['status'])} &nbsp; "
+                f"<span style='color:#6B7280;font-size:0.9em;'>Đã mở {aging_label(current_t)}</span>",
+                unsafe_allow_html=True,
+            )
             # Đường dẫn chia sẻ ticket nhanh dành cho BA/Admin
             st.markdown("🔗 **Liên kết chia sẻ ticket nhanh (BA-Share):**")
 
@@ -1823,59 +1901,40 @@ def render_ticket_domain_page(state_key, main_title, subtitle, domain_forms, sho
                     st.error(f"Lỗi hiển thị dữ liệu Form: {e}")
 
             # Hiển thị hội thoại
-            for m in current_t['msgs']:
-                is_admin_msg = m['user'].startswith("Admin")
-                with st.chat_message("assistant" if is_admin_msg else "user"):
-                    label = "🔒 Nội bộ" if m['type'] == "internal" else "🌐 Công khai"
-                    st.write(f"**{m['user']}** ({label})")
-                    st.write(m['msg'])
-                    # Hiển thị ngày và giờ cùng nhau
-                    st.caption(f"{m.get('date', '')} • {m.get('time', '')}")
+            render_ticket_messages(current_t['msgs'], show_internal=True)
 
-            # Nhập Log mới — Admin only
+            # Nhập Log + đổi trạng thái trong 1 lần Lưu — Admin only
             st.divider()
             if is_admin():
-                log_msg = st.text_area("Nhập nội dung xử lý (Log)...", height=120, placeholder="Bạn có thể nhập nhiều dòng nội dung log xử lý tại đây...", key=f"log_msg_{state_key}")
-                log_type = st.radio("Loại log:", ["Công khai", "Nội bộ (Chỉ Admin)"], horizontal=True, key=f"log_type_{state_key}")
-
-                c_btn1, c_btn2 = st.columns(2)
-                if c_btn1.button("📩 Gửi Log", use_container_width=True, key=f"send_log_{state_key}"):
-                    if log_msg:
-                        mtype = "internal" if "Nội bộ" in log_type else "public"
-                        db.add_ticket_message(current_t['id'], "Admin Nam", log_msg, mtype)
-                        st.rerun()
-                    else:
-                        st.warning("Vui lòng nhập nội dung")
-
-                # Dropdown chuyển trạng thái
-                st.divider()
-                st.markdown("**🔄 Chuyển trạng thái Ticket:**")
                 current_status = current_t['status']
-                new_status = st.selectbox(
-                    "Chọn trạng thái mới",
-                    STATUS_LIST,
-                    index=STATUS_LIST.index(current_status) if current_status in STATUS_LIST else 0,
-                    key=f"status_change_{state_key}"
-                )
-                col_s1, col_s2 = st.columns(2)
-                if col_s1.button("🔄 Cập nhật trạng thái", use_container_width=True, key=f"update_status_{state_key}"):
-                    if new_status != current_status:
-                        if new_status == "Hoàn thành":
-                            action_log = log_msg if log_msg else "Admin đã đánh dấu hoàn thành"
-                            db.complete_ticket(current_t['id'], current_t['subject'], action_log)
-                            st.balloons()
-                        else:
-                            db.update_ticket_status(current_t['id'], new_status)
-                        st.rerun()
+                with st.form(key=f"admin_update_{state_key}_{current_t['id']}", clear_on_submit=True):
+                    log_msg = st.text_area("Nội dung xử lý (Log)", height=120, placeholder="Có thể để trống nếu chỉ đổi trạng thái...")
+                    c_type, c_status = st.columns(2)
+                    log_type = c_type.radio("Loại log:", ["Công khai", "Nội bộ (Chỉ Admin)"], horizontal=True)
+                    new_status = c_status.selectbox(
+                        "Trạng thái",
+                        STATUS_LIST,
+                        index=STATUS_LIST.index(current_status) if current_status in STATUS_LIST else 0,
+                    )
+                    submitted = st.form_submit_button("💾 Lưu cập nhật", type="primary", width="stretch")
+                if submitted:
+                    log_msg = log_msg.strip()
+                    status_changed = new_status != current_status
+                    if not log_msg and not status_changed:
+                        st.warning("Hãy nhập nội dung log hoặc chọn trạng thái mới.")
                     else:
-                        st.info("Trạng thái không thay đổi.")
-                if col_s2.button("❌ Từ chối Ticket", use_container_width=True, key=f"reject_{state_key}"):
-                    if current_status != "Từ chối":
-                        db.update_ticket_status(current_t['id'], "Từ chối")
+                        if log_msg:
+                            mtype = "internal" if "Nội bộ" in log_type else "public"
+                            # Đang đổi trạng thái thì không tự chuyển 'Mới tạo → Đã tiếp nhận' (tránh 2 dòng log trạng thái)
+                            db.add_ticket_message(current_t['id'], ADMIN_DISPLAY_NAME, log_msg, mtype, from_admin=not status_changed)
+                        if status_changed:
+                            if new_status == "Hoàn thành":
+                                # Dùng complete_ticket để ghi nhận vào bảng tasks cho báo cáo tuần
+                                db.complete_ticket(current_t['id'], current_t['subject'], log_msg or "Admin đã đánh dấu hoàn thành", changed_by=ADMIN_DISPLAY_NAME)
+                                st.balloons()
+                            else:
+                                db.update_ticket_status(current_t['id'], new_status, changed_by=ADMIN_DISPLAY_NAME)
                         st.rerun()
-                    else:
-                        st.info("Ticket này đã bị từ chối rồi.")
-
                 # Khu vực Quản trị Admin - Sửa và Xóa Ticket
                 st.divider()
                 with st.expander("🛠️ Quản trị Admin - Chỉnh sửa / Xóa Ticket"):
@@ -1970,36 +2029,27 @@ if page == "🏠 Trang chủ":
             ]
 
         if filtered:
-            col_widths = [1.4, 2.5, 2.2, 1.5, 1.2, 1.5, 1.2]
-            header_cols = st.columns(col_widths)
-            headers = ["Mã Ticket", "Tiêu đề", "Loại Form", "Người y/c", "Ngày tạo", "Trạng thái", ""]
-            for col, h in zip(header_cols, headers):
-                col.markdown(f"**{h}**")
-            st.markdown("<hr style='margin:4px 0 8px 0;border-color:#e5e7eb;'>", unsafe_allow_html=True)
-
-            for t in filtered:
+            rows = ticket_table_rows(filtered)
+            for row, t in zip(rows, filtered):
                 f_type = normalize_form_type(t.get("form_type"))
                 f_label = FORM_TYPE_TO_CONFIG.get(f_type, {}).get("label", f_type or "—")
-                short_label = re.sub(r"^(Form \d+|ERP-\d+|GreeApp-\d+):\s*", "", f_label)
-                tid = t.get("id", "")
-
-                r_cols = st.columns(col_widths)
-                # Bấm mã ticket: mở màn xem nhanh ở tab mới (dùng để gửi link cho người khác)
-                r_cols[0].markdown(
-                    f"<a href='/?ticket={tid}' target='_blank' rel='noreferrer' "
-                    f"style='font-family:monospace;font-size:0.85em;color:#2563eb;"
-                    f"text-decoration:none;font-weight:600;'>{tid}</a>",
-                    unsafe_allow_html=True
-                )
-                r_cols[1].markdown(t.get("subject") or "—")
-                r_cols[2].markdown(f"<span style='font-size:0.85em;color:#6B7280;'>{short_label}</span>", unsafe_allow_html=True)
-                r_cols[3].markdown(t.get("requester") or "—")
-                r_cols[4].markdown(f"<span style='font-size:0.85em;'>{format_ticket_date(t.get('created_at'))}</span>", unsafe_allow_html=True)
-                r_cols[5].markdown(status_badge(t.get("status", "")), unsafe_allow_html=True)
-                # Nút: mở thẳng trong app (có quyền Admin để xử lý ticket)
-                if r_cols[6].button("Chi tiết", key=f"home_goto_{tid}", use_container_width=True):
-                    goto_ticket_detail(t)
-                    st.rerun()
+                row["Loại Form"] = re.sub(r"^(Form \d+|ERP-\d+|GreeApp-\d+):\s*", "", f_label)
+                # Link xem nhanh ở tab mới (dùng để gửi cho người khác)
+                row["Link chia sẻ"] = f"/?ticket={t['id']}"
+            st.caption("Bấm vào ô đầu dòng để mở ticket trong trang xử lý.")
+            event = st.dataframe(
+                pd.DataFrame(rows),
+                key="home_ticket_table",
+                on_select="rerun",
+                selection_mode="single-row",
+                hide_index=True,
+                width="stretch",
+                column_order=["Mã Ticket", "Tiêu đề", "Loại Form", "Người y/c", "Ngày tạo", "Đã mở", "Trạng thái", "Link chia sẻ"],
+                column_config={"Link chia sẻ": st.column_config.LinkColumn("Link chia sẻ", display_text="Mở ↗")},
+            )
+            if event.selection.rows:
+                goto_ticket_detail(filtered[event.selection.rows[0]])
+                st.rerun()
         else:
             st.info("Không có ticket nào khớp với bộ lọc.")
     else:

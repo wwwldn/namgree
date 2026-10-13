@@ -14,8 +14,12 @@
 3. **Import dump vào TiDB làm mất bảng `ticket_messages`.** Dump xếp bảng theo ABC nên `ticket_messages` được tạo trước `tickets`. Luôn thêm `SET FOREIGN_KEY_CHECKS=0;` ở đầu file (dòng `/*!40014 ... */` trong dump có thể không chạy). Sau import kiểm tra `SELECT COUNT(*)` từng bảng.
 4. **Lần đầu chẩn đoán sai (09/10/2026):** đã kết luận "thiếu bảng" khi chưa xem DB thật. → Có thông tin đăng nhập thì kiểm tra DB thật (bảng, collation, số dòng) trước khi sửa code.
 5. **Railway (DB cũ) đã ngừng,** kết nối báo `2013 Lost connection ... reading initial communication packet`. Không dùng lại các host `*.proxy.rlwy.net` trong `cmd_run.txt`.
+6. **Mã ticket trùng & task trùng (13/10/2026).** Mã cũ `GREE-IT_YYYYMM_<random 100-999>` dễ trùng (tháng 6 có 61 ticket) → nay `db.create_ticket()` tự sinh mã tăng dần theo tháng và tự thử lại khi trùng. `complete_ticket()` trước đây INSERT `tasks` mỗi lần bấm → 2 ticket bị đếm đôi trong báo cáo tuần; nay mỗi ticket chỉ giữ 1 dòng `tasks`.
+7. **Mật khẩu Admin từng nằm trong code public** (`gree@2025`, vẫn còn trong lịch sử git — không dùng lại mật khẩu này). Nay đọc từ Secrets `ADMIN_PASSWORD`; thiếu key này thì không đăng nhập Admin được.
 
 ## Quy tắc an toàn
 - Repo là **public**: không commit mật khẩu, `secrets.toml`, file backup `.sql` có dữ liệu thật. `cmd_run.txt` hiện còn mật khẩu Railway — không commit file này.
-- Code mới gọi DB: dùng `get_connection()` trong `db.py`, xử lý trường hợp trả về `None`; sau khi ghi dữ liệu gọi `.clear()` cache tương ứng (`get_all_tickets`, `get_settings`).
+- Secrets cần có: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASS`, `DB_NAME`, `ADMIN_PASSWORD`.
+- Đổi trạng thái ticket chỉ qua `db.update_ticket_status()` / `db.complete_ticket()` — hai hàm này ghi `closed_at` và dòng log `type='status'`. Không UPDATE `tickets.status` trực tiếp.
+- Code mới gọi DB: dùng `get_connection()` trong `db.py`, xử lý trường hợp trả về `None`; sau khi ghi dữ liệu gọi `.clear()` cache tương ứng (`get_all_tickets`, `get_tasks`, `get_settings`). `get_connection()` lấy từ pool → luôn `conn.close()` để trả kết nối.
 - Khi gặp lỗi mới: thêm vào mục "Lỗi đã gặp" ở trên (ngày, thông báo lỗi, nguyên nhân, cách sửa).
