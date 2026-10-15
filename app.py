@@ -11,6 +11,12 @@ import re
 from config import Config
 import db
 import mailer
+import importlib
+
+# Streamlit Cloud tự deploy chỉ chạy lại app.py, module db cũ vẫn nằm trong bộ nhớ
+# → thiếu hàm mới thì nạp lại db.py (xem CLAUDE.md, lỗi 8)
+if not hasattr(db, "get_work_note_drafts"):
+    db = importlib.reload(db)
 from ai_notes import parse_notes_json
 
 try:
