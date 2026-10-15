@@ -2,6 +2,7 @@ import mysql.connector
 from mysql.connector import Error, pooling
 import datetime
 import json
+import os
 
 import streamlit as st
 
@@ -25,6 +26,9 @@ except Exception as e:
         'collation': 'utf8mb4_general_ci'
     }
 
+
+# app.py so mốc này với file trên đĩa để tự nạp lại db.py sau khi deploy (CLAUDE.md, lỗi 8)
+LOADED_MTIME = os.path.getmtime(__file__)
 
 # Trạng thái coi như đã đóng (ghi closed_at)
 CLOSED_STATUSES = ("Hoàn thành", "Từ chối")
