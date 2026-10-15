@@ -168,6 +168,19 @@ def init_db():
         )
         """)
 
+    # Ghi chú do AI tổng hợp đưa vào → chờ duyệt, duyệt xong mới chuyển sang work_notes
+    if 'work_note_drafts' not in existing_tables:
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS work_note_drafts (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            note_date DATE NOT NULL,
+            category VARCHAR(30) NOT NULL,
+            content TEXT NOT NULL,
+            source VARCHAR(50) DEFAULT 'AI',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
     conn.commit()
     cursor.close()
     conn.close()
@@ -430,4 +443,65 @@ def save_work_note_changes(updated, deleted_ids):
     cursor.close()
     conn.close()
     get_work_notes.clear()
+    return True
+
+
+# -----------------
+# GHI CHÚ CHỜ DUYỆT (AI đưa vào)
+# -----------------
+@st.cache_data(ttl=30)
+def get_work_note_drafts():
+    conn = get_connection()
+    if not conn: return []
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM work_note_drafts ORDER BY note_date, id")
+    drafts = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return drafts
+
+def add_work_note_drafts(drafts, source="AI"):
+    """drafts: list dict (note_date, category, content). Trả về số dòng đã thêm, None nếu lỗi kết nối."""
+    conn = get_connection()
+    if not conn: return None
+    cursor = conn.cursor()
+    cursor.executemany(
+        "INSERT INTO work_note_drafts (note_date, category, content, source) VALUES (%s, %s, %s, %s)",
+        [(d['note_date'], d['category'], d['content'], source) for d in drafts]
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+    get_work_note_drafts.clear()
+    return len(drafts)
+
+def approve_work_note_drafts(drafts):
+    """Duyệt: ghi vào work_notes (dùng nội dung đã sửa nếu có) rồi xóa khỏi hàng chờ — cùng 1 transaction.
+    drafts: list dict (id, note_date, category, content)."""
+    conn = get_connection()
+    if not conn: return False
+    cursor = conn.cursor()
+    for d in drafts:
+        cursor.execute(
+            "INSERT INTO work_notes (note_date, category, content) VALUES (%s, %s, %s)",
+            (d['note_date'], d['category'], d['content'])
+        )
+        cursor.execute("DELETE FROM work_note_drafts WHERE id = %s", (d['id'],))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    get_work_note_drafts.clear()
+    get_work_notes.clear()
+    return True
+
+def delete_work_note_drafts(ids):
+    conn = get_connection()
+    if not conn: return False
+    cursor = conn.cursor()
+    for draft_id in ids:
+        cursor.execute("DELETE FROM work_note_drafts WHERE id = %s", (draft_id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    get_work_note_drafts.clear()
     return True

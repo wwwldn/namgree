@@ -11,6 +11,7 @@ import re
 from config import Config
 import db
 import mailer
+from ai_notes import parse_notes_json
 
 try:
     from docx import Document
@@ -1488,6 +1489,89 @@ def render_work_notes_editor(week_notes, start_date, end_date):
         st.session_state["_notes_editor_version"] = version + 1
         st.rerun()
 
+def render_ai_notes_paste_box():
+    """Dán JSON do AI tổng hợp (ChatGPT/Claude trên web...) → đưa vào hàng chờ duyệt."""
+    with st.expander("📥 Dán JSON từ AI vào hàng chờ"):
+        st.caption(
+            'Định dạng: `{"notes": [{"date": "2026-10-13", "category": "erp", "content": "..."}]}` — '
+            "category: erp / warranty / gree_app / it. Chi tiết xem `ai_notes.py`."
+        )
+        raw = st.text_area("JSON", height=160, key="ai_notes_raw", label_visibility="collapsed")
+        if st.button("➕ Đưa vào hàng chờ duyệt", key="btn_ai_notes_import"):
+            notes, errors = parse_notes_json(raw)
+            if errors:
+                st.error("Chưa thêm gì vì có lỗi:\n\n" + "\n".join(f"- {e}" for e in errors))
+            elif not notes:
+                st.warning("Không có ghi chú nào.")
+            elif db.add_work_note_drafts(notes, source="AI (dán)"):
+                st.session_state["_drafts_msg"] = f"Đã thêm {len(notes)} ghi chú vào hàng chờ duyệt."
+                st.rerun()
+
+def render_note_drafts_review(start_date, end_date):
+    """Ghi chú AI đưa vào của tuần đang xem: sửa nếu cần, tick chọn rồi Duyệt (→ work_notes) hoặc Bỏ."""
+    msg = st.session_state.pop("_drafts_msg", None)
+    if msg:
+        st.success(msg)
+    drafts = db.get_work_note_drafts()
+    week_drafts = [d for d in drafts if start_date <= to_date(d["note_date"]) <= end_date]
+    other_weeks = sorted({to_date(d["note_date"]) for d in drafts} - {to_date(d["note_date"]) for d in week_drafts})
+    if other_weeks:
+        st.caption(
+            f"ℹ️ Còn {len(drafts) - len(week_drafts)} ghi chú chờ duyệt ở tuần khác "
+            f"(ngày: {', '.join(d.strftime('%d/%m') for d in other_weeks)}) — chọn tuần đó ở trên để duyệt."
+        )
+    if not week_drafts:
+        st.info("Không có ghi chú nào đang chờ duyệt trong tuần này.")
+        return
+
+    label_to_key = {label: key for key, label in WORK_NOTE_LABELS.items()}
+    original = pd.DataFrame(
+        [
+            {"id": d["id"], "Chọn": True, "Ngày": to_date(d["note_date"]),
+             "Nhóm": WORK_NOTE_LABELS.get(d["category"], d["category"]), "Nội dung": d["content"],
+             "Nguồn": d.get("source") or ""}
+            for d in week_drafts
+        ],
+        columns=["id", "Chọn", "Ngày", "Nhóm", "Nội dung", "Nguồn"],
+    )
+    version = st.session_state.get("_drafts_editor_version", 0)
+    edited = st.data_editor(
+        original,
+        key=f"drafts_editor_{start_date}_{version}",
+        hide_index=True,
+        width="stretch",
+        column_order=["Chọn", "Ngày", "Nhóm", "Nội dung", "Nguồn"],
+        disabled=["Nguồn"],
+        column_config={
+            "Chọn": st.column_config.CheckboxColumn("Chọn", width="small"),
+            "Ngày": st.column_config.DateColumn("Ngày", format="DD/MM/YYYY", required=True),
+            "Nhóm": st.column_config.SelectboxColumn("Nhóm", options=list(label_to_key), required=True),
+            "Nội dung": st.column_config.TextColumn("Nội dung", width="large", required=True),
+            "Nguồn": st.column_config.TextColumn("Nguồn", width="small"),
+        },
+    )
+    selected = [r for r in edited.to_dict("records") if r.get("Chọn")]
+    b1, b2, _ = st.columns([1, 1, 2])
+    if b1.button(f"✅ Duyệt {len(selected)} mục đã chọn", type="primary", disabled=not selected, key="btn_approve_drafts"):
+        approved = []
+        for r in selected:
+            content = str(r.get("Nội dung") or "").strip()
+            if content and r.get("Nhóm"):
+                approved.append({
+                    "id": int(r["id"]), "content": content, "category": label_to_key[r["Nhóm"]],
+                    "note_date": to_date(r.get("Ngày")) or to_date(original.loc[original["id"] == r["id"], "Ngày"].iloc[0]),
+                })
+        if db.approve_work_note_drafts(approved):
+            st.session_state["_drafts_msg"] = f"Đã duyệt {len(approved)} ghi chú — đã vào báo cáo tuần."
+            st.session_state["_drafts_editor_version"] = version + 1
+            st.session_state["_notes_editor_version"] = st.session_state.get("_notes_editor_version", 0) + 1
+            st.rerun()
+    if b2.button(f"🗑️ Bỏ {len(selected)} mục đã chọn", disabled=not selected, key="btn_reject_drafts"):
+        if db.delete_work_note_drafts([int(r["id"]) for r in selected]):
+            st.session_state["_drafts_msg"] = f"Đã bỏ {len(selected)} ghi chú."
+            st.session_state["_drafts_editor_version"] = version + 1
+            st.rerun()
+
 # -----------------
 # THANH ĐIỀU HƯỚNG (SIDEBAR)
 # -----------------
@@ -2269,6 +2353,15 @@ elif page == "📈 Báo cáo tuần của Nam":
         "ngày tạo ticket. Các dòng hiển thị 'Mã Ticket: —' là log được ghi trước khi cập nhật cột `ticket_id` (17/6/2026), "
         "nên chưa liên kết lại được với ticket gốc.*"
     )
+
+    st.divider()
+    st.subheader("🤖 Ghi chú AI tổng hợp — chờ duyệt")
+    st.caption(
+        "Nội dung ngoài ticket do AI tổng hợp đưa vào (chạy `python ai_notes.py file.json` hoặc dán JSON bên dưới). "
+        "Xem/sửa lại, tick chọn rồi bấm **Duyệt** → chuyển xuống bảng ghi chú bên dưới và được đưa vào file mẫu."
+    )
+    render_note_drafts_review(start_date, end_date)
+    render_ai_notes_paste_box()
 
     st.divider()
     st.subheader("📝 Ghi chú công việc ngoài ticket")
