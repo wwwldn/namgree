@@ -12,6 +12,8 @@ from config import Config
 import db
 import mailer
 import importlib
+import time
+import mysql.connector
 
 # Streamlit Cloud tự deploy chỉ chạy lại app.py, module db cũ vẫn nằm trong bộ nhớ
 # → thiếu hàm mới thì nạp lại db.py (xem CLAUDE.md, lỗi 8)
@@ -2432,7 +2434,7 @@ elif page == "⚙️ Cài đặt":
 
     cfg = db.get_settings()
 
-    tab_smtp, tab_schedule = st.tabs(["📮 Cấu hình SMTP", "🗓️ Lịch gửi báo cáo tuần"])
+    tab_smtp, tab_schedule, tab_speed = st.tabs(["📮 Cấu hình SMTP", "🗓️ Lịch gửi báo cáo tuần", "⏱️ Kiểm tra tốc độ"])
 
     with tab_smtp:
         st.caption(
@@ -2573,6 +2575,58 @@ elif page == "⚙️ Cài đặt":
             "email sẽ được gửi ở lần truy cập kế tiếp (vẫn trong tuần đó, không bị gửi trùng). "
             "Muốn gửi đúng giờ tuyệt đối cần thêm bộ hẹn giờ chạy bên ngoài (ví dụ GitHub Actions)."
         )
+
+    with tab_speed:
+        st.caption(
+            "Đo ngay trên server đang chạy app (Streamlit Cloud), không phải từ máy bạn. "
+            "Dùng để biết trang chậm do DB (khoảng cách server ↔ TiDB Singapore) hay do Streamlit."
+        )
+        if st.button("⏱️ Đo tốc độ DB", key="btn_speed_test"):
+            def timed(fn):
+                started = time.perf_counter()
+                result = fn()
+                return (time.perf_counter() - started) * 1000, result
+
+            def select_one():
+                conn = db.get_connection()
+                cursor = conn.cursor()
+                rtts = []
+                for _ in range(3):
+                    started = time.perf_counter()
+                    cursor.execute("SELECT 1")
+                    cursor.fetchall()
+                    rtts.append((time.perf_counter() - started) * 1000)
+                cursor.close()
+                conn.close()
+                return min(rtts)
+
+            rows = []
+            rtt = select_one()
+            rows.append({"Bước": "1 lượt đi-về server ↔ DB (SELECT 1)", "Thời gian (ms)": round(rtt)})
+            ms, _ = timed(lambda: mysql.connector.connect(**db.DB_CONFIG).close())
+            rows.append({"Bước": "Mở kết nối SSL mới (không qua pool)", "Thời gian (ms)": round(ms)})
+            total_db = 0
+            for name in ["get_all_tickets", "get_tasks", "get_settings", "get_work_notes", "get_work_note_drafts"]:
+                fn = getattr(db, name)
+                fn.clear()
+                ms, data = timed(fn)
+                total_db += ms
+                rows.append({"Bước": f"{name}() — không cache ({len(data)} dòng)", "Thời gian (ms)": round(ms)})
+            ms, _ = timed(db.get_all_tickets)
+            rows.append({"Bước": "get_all_tickets() — có cache", "Thời gian (ms)": round(ms)})
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+            if rtt > 100:
+                st.warning(
+                    f"Mỗi lượt đi-về tới DB mất ~{rtt:.0f}ms → server Streamlit ở xa TiDB (Singapore). "
+                    f"Lần tải trang khi hết cache tốn ~{total_db / 1000:.1f}s chỉ riêng cho DB. "
+                    "Cách khắc phục triệt để: tạo cluster TiDB ở region gần server Streamlit rồi chuyển dữ liệu."
+                )
+            else:
+                st.success(
+                    f"DB phản hồi nhanh (~{rtt:.0f}ms/lượt, ~{total_db / 1000:.1f}s cho toàn bộ truy vấn khi hết cache). "
+                    "Nếu trang vẫn chậm thì nguyên nhân nằm ở Streamlit (app ngủ/khởi động lại, dựng giao diện)."
+                )
 
 else:
     st.markdown(f'<div class="main-header">{page}</div>', unsafe_allow_html=True)

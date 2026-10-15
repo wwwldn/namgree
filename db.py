@@ -30,6 +30,9 @@ except Exception as e:
 CLOSED_STATUSES = ("Hoàn thành", "Từ chối")
 # Mã ticket tạo theo giờ Việt Nam (đổi tháng đúng lúc 0h VN)
 VN_TZ = datetime.timezone(datetime.timedelta(hours=7))
+# Mọi thao tác ghi trong app đều gọi .clear() cache tương ứng → TTL dài không làm hiện dữ liệu cũ,
+# chỉ giảm số lần truy vấn DB. Riêng hàng chờ AI (ghi từ ngoài app qua ai_notes.py) dùng TTL ngắn.
+CACHE_TTL = 600
 
 
 @st.cache_resource
@@ -41,10 +44,9 @@ def _get_pool():
 def get_connection():
     try:
         try:
-            conn = _get_pool().get_connection()
-            # TiDB Serverless tự cắt kết nối rảnh lâu → ping để nối lại trước khi dùng
-            conn.ping(reconnect=True, attempts=2, delay=0)
-            return conn
+            # Pool tự kiểm tra kết nối (is_connected) và nối lại nếu TiDB đã cắt kết nối rảnh
+            # → không ping thêm lần nữa (mỗi lượt đi-về tới Singapore tốn vài chục → vài trăm ms)
+            return _get_pool().get_connection()
         except pooling.PoolError:
             # Hết kết nối rảnh trong pool → mở kết nối riêng như trước
             conn = mysql.connector.connect(**DB_CONFIG)
@@ -185,7 +187,7 @@ def init_db():
     cursor.close()
     conn.close()
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=CACHE_TTL)
 def get_all_tickets():
     conn = get_connection()
     if not conn: return []
@@ -321,7 +323,7 @@ def complete_ticket(ticket_id, subject, log_msg, changed_by="Admin"):
     get_tasks.clear()
     return True
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=CACHE_TTL)
 def get_tasks():
     conn = get_connection()
     if not conn: return []
@@ -356,7 +358,7 @@ def delete_ticket(ticket_id):
     get_all_tickets.clear()
     return True
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=CACHE_TTL)
 def get_settings():
     """Đọc toàn bộ cấu hình dạng key-value. Trả về dict rỗng nếu chưa cấu hình gì."""
     conn = get_connection()
@@ -402,7 +404,7 @@ def update_ticket_data(ticket_id, subject, requester, form_data):
     return True
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=CACHE_TTL)
 def get_work_notes():
     conn = get_connection()
     if not conn: return []
@@ -449,7 +451,7 @@ def save_work_note_changes(updated, deleted_ids):
 # -----------------
 # GHI CHÚ CHỜ DUYỆT (AI đưa vào)
 # -----------------
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=60)
 def get_work_note_drafts():
     conn = get_connection()
     if not conn: return []
