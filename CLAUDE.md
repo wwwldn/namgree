@@ -16,6 +16,7 @@
 5. **Railway (DB cũ) đã ngừng,** kết nối báo `2013 Lost connection ... reading initial communication packet`. Không dùng lại các host `*.proxy.rlwy.net` trong `cmd_run.txt`.
 6. **Mã ticket trùng & task trùng (13/10/2026).** Mã cũ `GREE-IT_YYYYMM_<random 100-999>` dễ trùng (tháng 6 có 61 ticket) → nay `db.create_ticket()` tự sinh mã tăng dần theo tháng và tự thử lại khi trùng. `complete_ticket()` trước đây INSERT `tasks` mỗi lần bấm → 2 ticket bị đếm đôi trong báo cáo tuần; nay mỗi ticket chỉ giữ 1 dòng `tasks`.
 7. **Mật khẩu Admin từng nằm trong code public** (`gree@2025`, vẫn còn trong lịch sử git — không dùng lại mật khẩu này). Nay đọc từ Secrets `ADMIN_PASSWORD`; thiếu key này thì không đăng nhập Admin được.
+8. **`AttributeError` khi gọi hàm mới trong `db.py` (15/10/2026, `db.get_work_note_drafts`).** Streamlit Cloud tự deploy chạy lại `app.py` mới nhưng vẫn giữ module `db` cũ trong bộ nhớ. → Code đúng thì chỉ cần **Manage app → Reboot app**. Sau mỗi lần push có sửa `db.py` (hoặc module khác ngoài `app.py`) nên Reboot app.
 
 ## Quy tắc an toàn
 - Repo là **public**: không commit mật khẩu, `secrets.toml`, file backup `.sql` có dữ liệu thật. `cmd_run.txt` hiện còn mật khẩu Railway — không commit file này.
