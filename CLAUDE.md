@@ -9,7 +9,8 @@
   - DB: MariaDB 11.3 local, DB `namgree`, user `namgree_app` (mật khẩu trong `.streamlit/secrets.toml`). Bản TiDB cũ: `D:\NAMLE\backup_namlegree\secrets_tidb.toml`. DB `namlegree` trên máy là bản thử cũ — không dùng.
   - Backup: Task Scheduler "NamLeGree Backup DB" chạy `deploy/backup_db.py` 12:30 hằng ngày → `D:\NAMLE\backup_namlegree\daily\` (giữ 30 ngày).
   - `db.py` ép collation `utf8mb4_unicode_ci` (MariaDB không có `utf8mb4_0900_ai_ci`, lỗi 1273). Dump từ TiDB phải đổi collation đó trước khi import vào MariaDB; `mysqldump` TiDB không dùng `--single-transaction` (lỗi SAVEPOINT).
-- Cũ: Streamlit Cloud `https://namgree.streamlit.app/` (push `main` tự deploy) + TiDB Cloud Serverless (MySQL v8.5, port 4000, bắt buộc SSL), thông tin trong Streamlit Secrets.
+  - MariaDB chỉ nghe `127.0.0.1,::1` (`bind-address` trong `E:\MariaDB 11.3\my.ini`).
+- Cũ: Streamlit Cloud `https://namgree.streamlit.app/` (push `main` tự deploy) + TiDB Cloud Serverless (MySQL v8.5, port 4000, bắt buộc SSL), thông tin trong Streamlit Secrets. **Từ 16/10/2026 chỉ còn tự chuyển hướng sang gree.leducnam.com** (`_is_old_deployment()` đầu `app.py`, chạy trước `init_db`); TiDB đã tắt gửi email tự động, dữ liệu đã đồng bộ hết sang local — không ghi gì vào TiDB nữa.
 - Không có `.streamlit/secrets.toml` thì `db.py` tự dùng MySQL localhost.
 - Kết nối thử từ máy: `"/e/MariaDB 11.3/bin/mysql" -h <host> -P 4000 -u <user> --ssl <db>` (đặt mật khẩu qua biến `MYSQL_PWD`).
 
