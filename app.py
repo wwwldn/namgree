@@ -50,24 +50,30 @@ if _is_old_deployment():
         f"""
         <div style="max-width:640px;margin:10vh auto;text-align:center">
           <h2>🔀 Hệ thống đã chuyển sang địa chỉ mới</h2>
-          <p>Vui lòng dùng <b>{NEW_APP_URL}</b> (đang tự chuyển trang...).</p>
-          <p><a href="{html.escape(target)}" target="_top" style="display:inline-block;padding:10px 22px;
+          <p>Vui lòng dùng <b>{NEW_APP_URL}</b> và lưu lại link mới (đang tự chuyển trang...).</p>
+          <p><a href="{html.escape(target)}" target="_blank" rel="noopener" style="display:inline-block;padding:10px 22px;
              background:#2563eb;color:#fff;border-radius:8px;text-decoration:none;font-weight:600">
              Mở {NEW_APP_URL.removeprefix('https://')}</a></p>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    # Thử tự chuyển cả khung ngoài cùng; trình duyệt chặn thì người dùng bấm nút ở trên
-    # st.iframe thay cho components.html (bị bỏ sau 2026-06-01; Cloud luôn cài Streamlit mới nhất)
-    render_html = getattr(st, "iframe", None) or __import__("streamlit.components.v1", fromlist=["html"]).html
-    render_html(
-        f"""<script>
-        const url = {json.dumps(target)};
-        for (const w of [window.top, window.parent]) {{ try {{ w.location.href = url; break; }} catch (e) {{}} }}
-        </script>""",
-        height=1,
-    )
+    # Streamlit Cloud nhúng app trong iframe sandbox KHÔNG cho chuyển trang cấp trên (target=_top, window.top
+    # đều bị chặn) → nút ở trên mở tab mới (sandbox cho phép popup). Tự chuyển: component (cùng origin với
+    # khung app) chèn script vào khung app để khung đó tự tải trang mới — khung được tự chuyển chính nó.
+    redirect_js = f"""<script>
+        try {{
+            const d = window.parent.document, s = d.createElement("script");
+            s.textContent = "window.location.replace(" + JSON.stringify({json.dumps(target)}) + ")";
+            d.body.appendChild(s);
+        }} catch (e) {{ console.warn("Không tự chuyển trang được:", e); }}
+        </script>"""
+    # components.html: iframe có allow-same-origin (truy cập được khung app); bản Streamlit mới đã bỏ thì dùng st.iframe
+    try:
+        import streamlit.components.v1 as components
+        components.html(redirect_js, height=0)
+    except (ImportError, AttributeError):
+        st.iframe(redirect_js, height=1)
     st.stop()
 
 # Khởi tạo database và bảng
