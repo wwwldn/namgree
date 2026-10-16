@@ -12,7 +12,10 @@ try:
         'database': st.secrets["DB_NAME"],
         'user': st.secrets["DB_USER"],
         'password': st.secrets["DB_PASS"],
-        'port': int(st.secrets["DB_PORT"])
+        'port': int(st.secrets["DB_PORT"]),
+        # mysql-connector mặc định xin utf8mb4_0900_ai_ci (MySQL 8) → MariaDB báo lỗi 1273 Unknown collation
+        'charset': 'utf8mb4',
+        'collation': 'utf8mb4_unicode_ci',
     }
 
 except Exception as e:
@@ -186,6 +189,66 @@ def init_db():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
         """)
+
+    # Theo dõi ticket bên ngoài (VD: AEGONA - Gree App) theo trạng thái → mục "Theo dõi ticket" trong báo cáo tuần.
+    # Không dùng khóa ngoại để tránh lỗi collation (CLAUDE.md, lỗi 2).
+    if 'ticket_tracking' not in existing_tables:
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ticket_tracking (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            ext_id VARCHAR(50),
+            title TEXT NOT NULL,
+            status VARCHAR(50) NOT NULL,
+            priority VARCHAR(20),
+            category VARCHAR(30) NOT NULL DEFAULT 'gree_app',
+            prod_date DATE NULL,
+            note TEXT,
+            status_changed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+    # Cột lấy từ file Excel log cập nhật hệ thống Gree App (tracking_import.py)
+    for col, col_type in (("content", "TEXT"), ("source_code", "VARCHAR(100)"), ("assignee", "VARCHAR(100)")):
+        cursor.execute(f"SHOW COLUMNS FROM ticket_tracking LIKE '{col}'")
+        if not cursor.fetchall():
+            cursor.execute(f"ALTER TABLE ticket_tracking ADD COLUMN {col} {col_type} NULL")
+    if 'ticket_tracking_logs' not in existing_tables:
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ticket_tracking_logs (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            tracking_id INT NOT NULL,
+            old_status VARCHAR(50),
+            new_status VARCHAR(50) NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
+    # Nhật ký gửi email báo cáo tuần (tự động / gửi ngay) → xem tuần nào đã gửi, lỗi, chưa gửi
+    if 'report_email_logs' not in existing_tables:
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS report_email_logs (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            target_date DATE NOT NULL,
+            trigger_type VARCHAR(20) NOT NULL,
+            status VARCHAR(20) NOT NULL,
+            recipients TEXT,
+            message TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+        # Lần gửi tự động trước khi có bảng này chỉ lưu trong app_settings → chép sang làm dòng đầu tiên
+        cursor.execute("SELECT setting_value FROM app_settings WHERE setting_key = 'report_email_last_sent_at'")
+        row = cursor.fetchone()
+        try:
+            sent_at = datetime.datetime.strptime(row[0], "%d/%m/%Y %H:%M") if row and row[0] else None
+        except ValueError:
+            sent_at = None
+        if sent_at:
+            cursor.execute(
+                "INSERT INTO report_email_logs (target_date, trigger_type, status, message, created_at) "
+                "VALUES (%s, 'auto', 'sent', 'Ghi lại từ cấu hình (trước khi có nhật ký)', %s)",
+                (sent_at.date(), sent_at)
+            )
 
     conn.commit()
     cursor.close()
@@ -452,6 +515,10 @@ def save_work_note_changes(updated, deleted_ids):
     return True
 
 
+def delete_work_note(note_id):
+    return save_work_note_changes([], [note_id])
+
+
 # -----------------
 # GHI CHÚ CHỜ DUYỆT (AI đưa vào)
 # -----------------
@@ -510,4 +577,110 @@ def delete_work_note_drafts(ids):
     cursor.close()
     conn.close()
     get_work_note_drafts.clear()
+    return True
+
+
+# -----------------
+# THEO DÕI TICKET BÊN NGOÀI (AEGONA...)
+# -----------------
+def _now_vn_naive():
+    return datetime.datetime.now(VN_TZ).replace(tzinfo=None)
+
+@st.cache_data(ttl=CACHE_TTL)
+def get_ticket_tracking():
+    conn = get_connection()
+    if not conn: return []
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM ticket_tracking ORDER BY id")
+    items = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return items
+
+@st.cache_data(ttl=CACHE_TTL)
+def get_ticket_tracking_logs():
+    conn = get_connection()
+    if not conn: return []
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM ticket_tracking_logs ORDER BY created_at, id")
+    logs = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return logs
+
+TRACKING_FIELDS = ("ext_id", "title", "status", "priority", "category", "prod_date", "note",
+                   "content", "source_code", "assignee")
+
+def save_ticket_tracking_changes(added, updated, deleted_ids):
+    """added/updated: list dict theo TRACKING_FIELDS (updated có thêm id; chỉ cập nhật các trường có trong dict).
+    Đổi trạng thái → ghi status_changed_at + 1 dòng ticket_tracking_logs (để báo cáo tuần biết đổi lúc nào)."""
+    conn = get_connection()
+    if not conn: return False
+    cursor = conn.cursor(dictionary=True)
+    now = _now_vn_naive()
+    for item in added:
+        cursor.execute(
+            f"INSERT INTO ticket_tracking ({', '.join(TRACKING_FIELDS)}, status_changed_at, created_at) "
+            f"VALUES ({', '.join(['%s'] * (len(TRACKING_FIELDS) + 2))})",
+            tuple(item.get(f) for f in TRACKING_FIELDS) + (now, now)
+        )
+        cursor.execute(
+            "INSERT INTO ticket_tracking_logs (tracking_id, old_status, new_status, created_at) VALUES (%s, NULL, %s, %s)",
+            (cursor.lastrowid, item["status"], now)
+        )
+    for item in updated:
+        cursor.execute("SELECT status FROM ticket_tracking WHERE id = %s", (item["id"],))
+        row = cursor.fetchone()
+        if not row:
+            continue
+        fields = [f for f in TRACKING_FIELDS if f in item]
+        cursor.execute(
+            f"UPDATE ticket_tracking SET {', '.join(f'{f} = %s' for f in fields)} WHERE id = %s",
+            tuple(item[f] for f in fields) + (item["id"],)
+        )
+        if "status" in item and row["status"] != item["status"]:
+            cursor.execute("UPDATE ticket_tracking SET status_changed_at = %s WHERE id = %s", (now, item["id"]))
+            cursor.execute(
+                "INSERT INTO ticket_tracking_logs (tracking_id, old_status, new_status, created_at) VALUES (%s, %s, %s, %s)",
+                (item["id"], row["status"], item["status"], now)
+            )
+    for item_id in deleted_ids:
+        cursor.execute("DELETE FROM ticket_tracking_logs WHERE tracking_id = %s", (item_id,))
+        cursor.execute("DELETE FROM ticket_tracking WHERE id = %s", (item_id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    get_ticket_tracking.clear()
+    get_ticket_tracking_logs.clear()
+    return True
+
+
+# -----------------
+# NHẬT KÝ GỬI EMAIL BÁO CÁO TUẦN
+# -----------------
+@st.cache_data(ttl=CACHE_TTL)
+def get_report_email_logs():
+    conn = get_connection()
+    if not conn: return []
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM report_email_logs ORDER BY created_at DESC, id DESC")
+    logs = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return logs
+
+def add_report_email_log(target_date, trigger_type, status, recipients, message):
+    """trigger_type: auto | manual; status: sent | failed. target_date: ngày dùng để xác định tuần báo cáo."""
+    conn = get_connection()
+    if not conn: return False
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO report_email_logs (target_date, trigger_type, status, recipients, message, created_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
+        (target_date, trigger_type, status, recipients, message, _now_vn_naive())
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+    get_report_email_logs.clear()
     return True

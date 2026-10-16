@@ -8,6 +8,7 @@ import hmac
 import calendar
 import io
 import re
+import html
 from config import Config
 import db
 import mailer
@@ -20,6 +21,7 @@ import mysql.connector
 if getattr(db, "LOADED_MTIME", None) != os.path.getmtime(db.__file__):
     db = importlib.reload(db)
 from ai_notes import parse_notes_json
+from tracking_import import parse_tracking_xlsx, match_tracking
 
 try:
     from docx import Document
@@ -28,6 +30,45 @@ try:
     DOCX_AVAILABLE = True
 except ImportError:
     DOCX_AVAILABLE = False
+
+# -----------------
+# CHUYỂN HƯỚNG BẢN CŨ (Streamlit Cloud + TiDB) → gree.leducnam.com (từ 16/10/2026)
+# -----------------
+# Streamlit Cloud không cấu hình redirect phía máy chủ được → app tự chuyển trang, chạy TRƯỚC init_db
+# để bản cũ không ghi gì thêm vào TiDB. Giữ nguyên query (?ticket=...) để link ticket cũ vẫn mở đúng.
+NEW_APP_URL = "https://gree.leducnam.com"
+
+def _is_old_deployment():
+    host = (st.context.headers.get("Host") or "").lower()
+    return host.endswith(".streamlit.app") or "tidbcloud.com" in str(db.DB_CONFIG.get("host", ""))
+
+if _is_old_deployment():
+    from urllib.parse import urlencode
+    query = urlencode(st.query_params.to_dict())
+    target = NEW_APP_URL + (f"/?{query}" if query else "/")
+    st.markdown(
+        f"""
+        <div style="max-width:640px;margin:10vh auto;text-align:center">
+          <h2>🔀 Hệ thống đã chuyển sang địa chỉ mới</h2>
+          <p>Vui lòng dùng <b>{NEW_APP_URL}</b> (đang tự chuyển trang...).</p>
+          <p><a href="{html.escape(target)}" target="_top" style="display:inline-block;padding:10px 22px;
+             background:#2563eb;color:#fff;border-radius:8px;text-decoration:none;font-weight:600">
+             Mở {NEW_APP_URL.removeprefix('https://')}</a></p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    # Thử tự chuyển cả khung ngoài cùng; trình duyệt chặn thì người dùng bấm nút ở trên
+    # st.iframe thay cho components.html (bị bỏ sau 2026-06-01; Cloud luôn cài Streamlit mới nhất)
+    render_html = getattr(st, "iframe", None) or __import__("streamlit.components.v1", fromlist=["html"]).html
+    render_html(
+        f"""<script>
+        const url = {json.dumps(target)};
+        for (const w of [window.top, window.parent]) {{ try {{ w.location.href = url; break; }} catch (e) {{}} }}
+        </script>""",
+        height=1,
+    )
+    st.stop()
 
 # Khởi tạo database và bảng
 # Tự hiện lỗi vì Streamlit Cloud ẩn nội dung exception không bắt ("error message is redacted")
@@ -193,6 +234,12 @@ WORK_NOTE_CATEGORIES = {
     "it": ("IT cơ bản", "CÔNG VIỆC IT CƠ BẢN"),
 }
 WORK_NOTE_LABELS = {key: label for key, (label, _) in WORK_NOTE_CATEGORIES.items()}
+
+# Theo dõi ticket bên ngoài (AEGONA...) theo trạng thái — thứ tự dùng để sắp xếp bảng
+TRACKING_STATUSES = ["Mới", "Chờ đề xuất", "Đang thực hiện", "Chờ cập nhật", "Đã lên Production", "Đóng", "Hủy"]
+# Mục đã đóng chỉ vào báo cáo tuần nếu đổi trạng thái trong tuần đó
+TRACKING_CLOSED = {"Đóng", "Hủy"}
+TRACKING_PRIORITIES = ["Cao", "Trung bình", "Thấp"]
 
 # Trạng thái coi như đã đóng — dùng để đẩy ticket chưa xong lên đầu danh sách
 CLOSED_STATUSES = {"Hoàn thành", "Từ chối"}
@@ -737,7 +784,7 @@ def week_date_range(year, month, week_no):
     saturday = monday + datetime.timedelta(days=5)
     return monday, saturday
 
-def build_report_context(year, month, week, reporter, tickets, tasks, notes=(), issues=""):
+def build_report_context(year, month, week, reporter, tickets, tasks, notes=(), issues="", tracking=(), tracking_logs=()):
     """Dựng toàn bộ dữ liệu báo cáo tuần. Tách riêng khỏi UI để cả trang Báo cáo lẫn
     chức năng gửi email tự động đều dùng chung một nguồn số liệu."""
     start_date, end_date = week_date_range(year, month, week)
@@ -758,6 +805,7 @@ def build_report_context(year, month, week, reporter, tickets, tasks, notes=(), 
         n for n in notes
         if to_date(n.get('note_date')) and start_date <= to_date(n.get('note_date')) <= end_date
     ]
+    week_tracking = build_week_tracking(tracking, tracking_logs, start_date, end_date)
 
     summary_rows = []
     for cfg in FORM_CONFIGS:
@@ -803,11 +851,31 @@ def build_report_context(year, month, week, reporter, tickets, tasks, notes=(), 
         "summary_rows": summary_rows,
         "completed_rows": completed_rows,
         "week_notes": week_notes,
+        "week_tracking": week_tracking,
         "issues": issues,
         "week_relevant_tickets": week_relevant_tickets,
         "week_new_tickets": week_new_tickets,
         "week_completed_tasks": week_completed_tasks,
     }
+
+def build_week_tracking(tracking, tracking_logs, start_date, end_date):
+    """Mục theo dõi ticket đưa vào báo cáo tuần: còn mở (tạo trước cuối tuần) hoặc đổi trạng thái trong tuần.
+    Mỗi mục kèm 'week_logs' (các lần đổi trạng thái trong tuần) và 'report_date' (ngày ghi ở đầu dòng)."""
+    logs_by_item = {}
+    for log in tracking_logs:
+        if to_date(log.get('created_at')) and start_date <= to_date(log['created_at']) <= end_date:
+            logs_by_item.setdefault(log['tracking_id'], []).append(log)
+    result = []
+    for item in tracking:
+        week_logs = logs_by_item.get(item['id'], [])
+        created = to_date(item.get('created_at'))
+        if not week_logs and (item.get('status') in TRACKING_CLOSED or (created and created > end_date)):
+            continue
+        report_date = to_date(week_logs[-1]['created_at']) if week_logs else to_date(item.get('status_changed_at'))
+        result.append(dict(item, week_logs=week_logs, report_date=report_date))
+    status_rank = {s: i for i, s in enumerate(TRACKING_STATUSES)}
+    result.sort(key=lambda x: (status_rank.get(x.get('status'), 99), x.get('report_date') or datetime.date.min))
+    return result
 
 # -----------------
 # GỬI EMAIL BÁO CÁO TUẦN
@@ -873,6 +941,47 @@ def weekly_email_due(settings, now=None):
     return now >= scheduled
 
 def send_weekly_report_email(settings, tickets, tasks, target_date=None, mark_sent=True):
+    """Gửi báo cáo tuần và ghi nhật ký (report_email_logs) dù thành công hay lỗi. Trả về (thành công, thông báo)."""
+    target_date = target_date or now_vn().date()
+    ok, msg = _send_weekly_report_email(settings, tickets, tasks, target_date, mark_sent)
+    recipients = ", ".join(mailer.parse_recipients(settings.get("report_email_to")))
+    cc = ", ".join(mailer.parse_recipients(settings.get("report_email_cc")))
+    db.add_report_email_log(
+        target_date, "auto" if mark_sent else "manual", "sent" if ok else "failed",
+        recipients + (f" (CC: {cc})" if cc else ""), msg,
+    )
+    return ok, msg
+
+def report_email_status(settings, logs, start_date, end_date, now=None):
+    """Tình trạng gửi email của tuần [start_date, end_date] → (kiểu hiển thị, nội dung).
+    kiểu: success | error | warning | info (tên hàm st.* tương ứng)."""
+    week_logs = [l for l in logs if start_date <= to_date(l["target_date"]) <= end_date]
+    sent = [l for l in week_logs if l["status"] == "sent"]
+    if sent:
+        last = sent[0]
+        kind = "tự động" if last["trigger_type"] == "auto" else "gửi tay"
+        to = f" tới {last['recipients']}" if last.get("recipients") else ""
+        more = f" (đã gửi {len(sent)} lần)" if len(sent) > 1 else ""
+        return "success", f"✅ **Đã gửi** ({kind}) lúc {last['created_at'].strftime('%H:%M %d/%m/%Y')}{to}{more}"
+    if week_logs:
+        last = week_logs[0]
+        return "error", (f"❌ **Gửi lỗi** lúc {last['created_at'].strftime('%H:%M %d/%m/%Y')} "
+                         f"({len(week_logs)} lần thử): {last.get('message') or ''}")
+    now = now or now_vn()
+    if settings.get("report_email_enabled") != "1":
+        return "info", "⏸️ **Chưa gửi** — đang tắt gửi tự động (bật ở ⚙️ Cài đặt → Lịch gửi báo cáo tuần)."
+    try:
+        weekday = int(settings.get("report_email_weekday", "5"))
+        schedule = f"{WEEKDAY_LABELS[weekday]} {settings.get('report_email_time') or '17:00'}"
+    except (ValueError, IndexError):
+        schedule = "(lịch chưa hợp lệ)"
+    if end_date < now.date():
+        return "warning", f"⚠️ **Chưa gửi** — tuần đã qua mà không có lần gửi nào (lịch: {schedule})."
+    if weekly_email_due(settings, now):
+        return "warning", f"⏳ **Chưa gửi** — đã quá giờ hẹn ({schedule}), sẽ gửi ở lần mở app kế tiếp."
+    return "info", f"🕒 **Chưa gửi** — lịch gửi tự động: {schedule}."
+
+def _send_weekly_report_email(settings, tickets, tasks, target_date, mark_sent):
     """Dựng báo cáo tuần theo mẫu công ty và gửi kèm email. Trả về (thành công, thông báo)."""
     if not DOCX_AVAILABLE:
         return False, "Chưa cài thư viện python-docx nên không tạo được file báo cáo."
@@ -884,7 +993,6 @@ def send_weekly_report_email(settings, tickets, tasks, target_date=None, mark_se
     if not to_list:
         return False, "Chưa cấu hình người nhận (To)."
 
-    target_date = target_date or now_vn().date()
     year, month = target_date.year, target_date.month
     week = min(week_of_month(target_date), max_weeks_in_month(year, month))
 
@@ -892,6 +1000,7 @@ def send_weekly_report_email(settings, tickets, tasks, target_date=None, mark_se
         year, month, week,
         settings.get("report_email_reporter") or Config.OWNER,
         tickets, tasks, db.get_work_notes(),
+        tracking=db.get_ticket_tracking(), tracking_logs=db.get_ticket_tracking_logs(),
     )
 
     try:
@@ -1049,7 +1158,14 @@ def generate_weekly_report_docx(ctx):
             for text, _ in note_lines:
                 doc.add_paragraph(text)
 
-    doc.add_heading("5. Vấn đề gặp phải / Lưu ý", level=2)
+    doc.add_heading("5. Theo dõi ticket (trạng thái)", level=2)
+    tracking_lines = build_tracking_lines(ctx.get('week_tracking', []))
+    if not tracking_lines:
+        doc.add_paragraph("(Không có)")
+    for text, _ in tracking_lines:
+        doc.add_paragraph(text)
+
+    doc.add_heading("6. Vấn đề gặp phải / Lưu ý", level=2)
     doc.add_paragraph(ctx['issues'].strip() if ctx['issues'] else "(Không có)")
 
     buffer = io.BytesIO()
@@ -1072,7 +1188,12 @@ def build_ticket_report_line(t, cfg):
     detail = " - ".join(detail_parts) if detail_parts else t.get("subject", "")
     requester = t.get("requester", "")
     status = t.get("status", "")
-    return f"{t.get('id', '')} – {detail} ({requester}) – {status}."
+    return f"{day_prefix(t.get('created_at'))}{t.get('id', '')} – {detail} ({requester}) – {status}."
+
+def day_prefix(value):
+    """'dd/mm: ' đặt ở đầu mỗi dòng báo cáo (rỗng nếu không có ngày)."""
+    d = to_date(value)
+    return f"{d.strftime('%d/%m')}: " if d else ""
 
 def build_domain_section_lines(tickets, domain):
     """Sinh nội dung cột 'Các công việc thực hiện' cho 1 domain (warranty/erp/...), phân theo từng Form
@@ -1095,24 +1216,41 @@ def build_domain_section_lines(tickets, domain):
 def build_note_lines(notes):
     """Mỗi ghi chú → 1 hoặc nhiều dòng '- nội dung' (ghi chú nhiều dòng thì giữ nguyên xuống dòng)."""
     lines = []
-    for note in notes:
+    for note in sorted(notes, key=lambda n: (to_date(n.get("note_date")) or datetime.date.min, n.get("id") or 0)):
+        prefix = day_prefix(note.get("note_date"))
         for text in str(note.get("content") or "").splitlines():
-            text = text.strip()
+            text = text.strip().lstrip("-+•").strip()
             if text:
-                lines.append((text if text.startswith(("-", "+", "•")) else f"- {text}", False))
+                lines.append((f"- {prefix}{text}", False))
+    return lines
+
+def build_tracking_lines(items):
+    """Mỗi mục theo dõi → '- dd/mm: #ID – Tiêu đề – Trạng thái'. Chỉ 4 trường này (theo yêu cầu);
+    ngày = lần đổi trạng thái gần nhất trong tuần, không có thì ngày đổi sang trạng thái hiện tại."""
+    lines = []
+    for item in items:
+        title = "; ".join(part.strip() for part in str(item.get("title") or "").splitlines() if part.strip() not in ("", "--"))
+        ext_id = str(item.get("ext_id") or "").strip()
+        if ext_id and not ext_id.startswith("#"):
+            ext_id = f"#{ext_id}"
+        text = f"- {day_prefix(item.get('report_date'))}{ext_id + ' – ' if ext_id else ''}{title} – {item.get('status') or ''}"
+        lines.append((text, False))
     return lines
 
 def build_report_row_lines(ctx, category):
     """Nội dung cột 'Các công việc thực hiện' của 1 dòng báo cáo: ticket theo Form (như cũ)
     + mục 'Công việc khác' lấy từ ghi chú công việc của nhóm đó."""
     lines = build_domain_section_lines(ctx['week_relevant_tickets'], category)
+    tracking_lines = build_tracking_lines([i for i in ctx.get('week_tracking', []) if i.get('category') == category])
     category_notes = [n for n in ctx.get('week_notes', []) if n.get('category') == category]
     note_lines = build_note_lines(category_notes)
-    if note_lines:
-        if lines:
+    extra_sections = [(title, extra) for title, extra in (("Theo dõi ticket", tracking_lines), ("Công việc khác", note_lines)) if extra]
+    for title, extra in extra_sections:
+        # Chỉ có đúng 1 loại nội dung thì không cần tiêu đề mục (giữ như trước)
+        if lines or len(extra_sections) > 1:
             section_no = sum(1 for _, bold in lines if bold) + 1
-            lines.append((f"{section_no}. Công việc khác:", True))
-        lines.extend(note_lines)
+            lines.append((f"{section_no}. {title}:", True))
+        lines.extend(extra)
     return lines
 
 def set_cell_lines(cell, lines):
@@ -1448,6 +1586,46 @@ def render_quick_note_form():
     elif msg:
         st.warning(msg[1])
 
+def wrapped_text_html(text):
+    """Nội dung giữ nguyên xuống dòng của người nhập và tự ngắt dòng theo độ rộng cột."""
+    return f'<div style="white-space: pre-wrap; word-break: break-word;">{html.escape(str(text or ""))}</div>'
+
+def render_work_notes_list(week_notes):
+    """Danh sách ghi chú của tuần: nội dung tự xuống dòng, mỗi dòng có nút Sửa / Xóa."""
+    if not week_notes:
+        st.info("Chưa có ghi chú nào trong tuần này.")
+        return
+    label_to_key = {label: key for key, label in WORK_NOTE_LABELS.items()}
+    notes = sorted(week_notes, key=lambda n: (to_date(n["note_date"]), n["id"]))
+    for n in notes:
+        c_date, c_cat, c_content, c_edit, c_del = st.columns([1, 1.2, 7, 0.6, 0.6], vertical_alignment="top")
+        c_date.markdown(f"**{to_date(n['note_date']).strftime('%d/%m')}**")
+        c_cat.caption(WORK_NOTE_LABELS.get(n["category"], n["category"]))
+        c_content.markdown(wrapped_text_html(n["content"]), unsafe_allow_html=True)
+        with c_edit.popover("✏️", help="Sửa ghi chú"):
+            with st.form(f"edit_note_{n['id']}", border=False):
+                new_date = st.date_input("Ngày", value=to_date(n["note_date"]), format="DD/MM/YYYY", key=f"edit_note_date_{n['id']}")
+                cat_labels = list(label_to_key)
+                cur_label = WORK_NOTE_LABELS.get(n["category"], cat_labels[0])
+                new_label = st.selectbox("Nhóm", cat_labels, index=cat_labels.index(cur_label) if cur_label in cat_labels else 0, key=f"edit_note_cat_{n['id']}")
+                new_content = st.text_area("Nội dung", value=n["content"], height=150, key=f"edit_note_content_{n['id']}")
+                if st.form_submit_button("💾 Lưu", type="primary"):
+                    if new_content.strip():
+                        db.save_work_note_changes(
+                            [{"id": n["id"], "note_date": new_date, "category": label_to_key[new_label], "content": new_content.strip()}], []
+                        )
+                        st.session_state["_notes_editor_version"] = st.session_state.get("_notes_editor_version", 0) + 1
+                        st.rerun()
+                    else:
+                        st.warning("Nội dung không được để trống.")
+        with c_del.popover("🗑️", help="Xóa ghi chú"):
+            st.write("Xóa ghi chú này?")
+            if st.button("Xóa", type="primary", key=f"del_note_{n['id']}"):
+                db.delete_work_note(n["id"])
+                st.session_state["_notes_editor_version"] = st.session_state.get("_notes_editor_version", 0) + 1
+                st.toast("Đã xóa ghi chú")
+                st.rerun()
+
 def render_work_notes_editor(week_notes, start_date, end_date):
     """Bảng sửa/xóa/thêm ghi chú của tuần đang xem trên trang Báo cáo."""
     label_to_key = {label: key for key, label in WORK_NOTE_LABELS.items()}
@@ -1467,6 +1645,7 @@ def render_work_notes_editor(week_notes, start_date, end_date):
         num_rows="dynamic",
         hide_index=True,
         width="stretch",
+        row_height=60,
         column_order=["Ngày", "Nhóm", "Nội dung"],
         column_config={
             "Ngày": st.column_config.DateColumn("Ngày", format="DD/MM/YYYY", default=min(max(now_vn().date(), start_date), end_date), required=True),
@@ -1496,6 +1675,187 @@ def render_work_notes_editor(week_notes, start_date, end_date):
         db.save_work_note_changes(updated, deleted_ids)
         st.session_state["_notes_editor_version"] = version + 1
         st.rerun()
+
+def generate_tracking_excel(ctx):
+    """File Excel theo dõi ticket của tuần (cùng bố cục bảng theo dõi AEGONA): các mục còn mở
+    + mục đổi trạng thái trong tuần, thêm cột 'Thay đổi trong tuần'. Trả về bytes .xlsx."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = f"Tuan {ctx['week']}-T{ctx['month']}"
+    period = f"{ctx['start_date'].strftime('%d/%m/%Y')} - {ctx['end_date'].strftime('%d/%m/%Y')}"
+    ws.append([f"THEO DÕI TICKET - TUẦN {ctx['week']} THÁNG {ctx['month']}/{ctx['year']} ({period})"])
+    ws["A1"].font = Font(bold=True, size=13)
+    ws.append([])
+
+    headers = ["Trạng thái cập nhật", "Ưu tiên", "Ngày cập nhật lên server Production", "ID AEGONA",
+               "Tiêu đề", "Thay đổi trong tuần", "Ghi chú", "Nội dung cập nhật", "Source code", "Người thực hiện"]
+    widths = [18, 11, 16, 11, 50, 30, 30, 70, 18, 18]
+    ws.append(headers)
+    thin = Side(style="thin", color="BFBFBF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for i, (cell, width) in enumerate(zip(ws[3], widths)):
+        # Giống file gốc: 2 cột đầu nền xanh, các cột còn lại nền cam
+        cell.fill = PatternFill("solid", fgColor="1F4E79" if i < 2 else "F79646")
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = border
+        ws.column_dimensions[cell.column_letter].width = width
+
+    new_fill = PatternFill("solid", fgColor="FFFF00")
+    for item in ctx.get("week_tracking", []):
+        changes = "\n".join(
+            f"{to_date(l['created_at']).strftime('%d/%m')}: "
+            + (f"{l['old_status']} → {l['new_status']}" if l.get("old_status") else f"Thêm mới ({l['new_status']})")
+            for l in item.get("week_logs", [])
+        )
+        ws.append([
+            item.get("status") or "", item.get("priority") or "", to_date(item.get("prod_date")),
+            item.get("ext_id") or "", item.get("title") or "", changes, item.get("note") or "",
+            item.get("content") or "", item.get("source_code") or "", item.get("assignee") or "",
+        ])
+        for cell in ws[ws.max_row]:
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+            cell.border = border
+            if item.get("status") == "Mới":
+                cell.fill = new_fill
+        ws.cell(ws.max_row, 3).number_format = "DD/MM/YYYY"
+        ws.cell(ws.max_row, 4).alignment = Alignment(horizontal="center", vertical="center")
+    ws.freeze_panes = "A4"
+    ws.auto_filter.ref = f"A3:J{max(ws.max_row, 3)}"
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+def render_tracking_import_box(items):
+    """Tải file Excel log cập nhật hệ thống Gree App → xem trước → cập nhật bảng theo dõi (xem tracking_import.py)."""
+    with st.expander("📥 Cập nhật từ file Excel log (sheet Logs)"):
+        st.caption("Lấy các dòng có 'Trạng thái cập nhật' khác trống / Đã cập nhật / Không cập nhật; "
+                   "khớp theo ID AEGONA (không có ID thì theo Tiêu đề). Mục không còn trong file được giữ nguyên.")
+        upload = st.file_uploader("File .xlsx", type=["xlsx"], key="tracking_xlsx", label_visibility="collapsed")
+        if upload is None:
+            return
+        file_items, errors = parse_tracking_xlsx(io.BytesIO(upload.getvalue()))
+        if errors:
+            st.error("\n".join(errors))
+            return
+        added, updated = match_tracking(file_items, items)
+        st.write(f"File có **{len(file_items)}** mục đang theo dõi → thêm **{len(added)}**, cập nhật **{len(updated)}**.")
+        by_id = {i["id"]: i for i in items}
+        preview = [
+            {"Thao tác": "Thêm", "ID": a.get("ext_id") or "", "Tiêu đề": a["title"], "Thay đổi": a["status"]} for a in added
+        ] + [
+            {"Thao tác": "Cập nhật", "ID": by_id[u["id"]].get("ext_id") or "", "Tiêu đề": by_id[u["id"]]["title"],
+             "Thay đổi": f"{by_id[u['id']]['status']} → {u['status']}" if "status" in u
+                         else ", ".join(f for f in u if f != "id")}
+            for u in updated
+        ]
+        if preview:
+            st.dataframe(pd.DataFrame(preview), hide_index=True, width="stretch")
+        if st.button("✅ Cập nhật bảng theo dõi", type="primary", disabled=not preview, key="btn_tracking_import"):
+            if db.save_ticket_tracking_changes(added, updated, []):
+                st.session_state["_tracking_msg"] = f"Đã cập nhật từ file: thêm {len(added)}, sửa {len(updated)}"
+                st.session_state["_tracking_editor_version"] = st.session_state.get("_tracking_editor_version", 0) + 1
+                st.rerun()
+
+def render_ticket_tracking_editor(items, logs, start_date, end_date):
+    """Bảng theo dõi ticket bên ngoài (AEGONA...): sửa trạng thái/ưu tiên/ngày lên Production ngay trong bảng.
+    Đổi trạng thái được ghi log → báo cáo tuần ghi 'trạng thái cũ → mới' kèm ngày."""
+    msg = st.session_state.pop("_tracking_msg", None)
+    if msg:
+        st.toast(msg)
+    show_closed = st.toggle("Hiện cả mục đã Đóng/Hủy", value=False, key="tracking_show_closed")
+    status_rank = {s: i for i, s in enumerate(TRACKING_STATUSES)}
+    shown = [i for i in items if show_closed or i.get("status") not in TRACKING_CLOSED]
+    shown.sort(key=lambda i: (status_rank.get(i.get("status"), 99), i["id"]))
+    label_to_key = {label: key for key, label in WORK_NOTE_LABELS.items()}
+    # Cột văn bản tự do: tên cột trên bảng → trường trong ticket_tracking
+    text_cols = {"Ghi chú": "note", "Nội dung cập nhật": "content", "Source code": "source_code", "Người thực hiện": "assignee"}
+    columns = ["id", "Trạng thái", "Ưu tiên", "Ngày lên Production", "ID", "Tiêu đề", "Nhóm", "Ghi chú",
+               "Nội dung cập nhật", "Source code", "Người thực hiện", "Đổi TT lúc"]
+    original = pd.DataFrame(
+        [
+            {"id": i["id"], "Trạng thái": i.get("status"), "Ưu tiên": i.get("priority") or None,
+             "Ngày lên Production": to_date(i.get("prod_date")), "ID": i.get("ext_id") or "",
+             "Tiêu đề": i.get("title") or "", "Nhóm": WORK_NOTE_LABELS.get(i.get("category"), i.get("category")),
+             **{col: i.get(field) or "" for col, field in text_cols.items()},
+             "Đổi TT lúc": to_date(i.get("status_changed_at")).strftime("%d/%m/%Y") if to_date(i.get("status_changed_at")) else ""}
+            for i in shown
+        ],
+        columns=columns,
+    )
+    version = st.session_state.get("_tracking_editor_version", 0)
+    edited = st.data_editor(
+        original,
+        key=f"tracking_editor_{show_closed}_{version}",
+        num_rows="dynamic",
+        hide_index=True,
+        width="stretch",
+        row_height=60,
+        column_order=columns[1:],
+        disabled=["Đổi TT lúc"],
+        column_config={
+            "Trạng thái": st.column_config.SelectboxColumn("Trạng thái", options=TRACKING_STATUSES, default="Mới", required=True, width="small"),
+            "Ưu tiên": st.column_config.SelectboxColumn("Ưu tiên", options=TRACKING_PRIORITIES, width="small"),
+            "Ngày lên Production": st.column_config.DateColumn("Lên Production", format="DD/MM/YYYY", width="small"),
+            "ID": st.column_config.TextColumn("ID AEGONA", width="small"),
+            "Tiêu đề": st.column_config.TextColumn("Tiêu đề", width="large", required=True),
+            "Nhóm": st.column_config.SelectboxColumn("Nhóm", options=list(label_to_key), default=WORK_NOTE_LABELS["gree_app"], required=True, width="small"),
+            "Ghi chú": st.column_config.TextColumn("Ghi chú", width="medium"),
+            "Nội dung cập nhật": st.column_config.TextColumn("Nội dung cập nhật", width="large"),
+            "Source code": st.column_config.TextColumn("Source code", width="small"),
+            "Người thực hiện": st.column_config.TextColumn("Người thực hiện", width="small"),
+            "Đổi TT lúc": st.column_config.TextColumn("Đổi TT lúc", width="small"),
+        },
+    )
+    if st.button("💾 Lưu bảng theo dõi ticket", key="btn_save_tracking"):
+        original_by_id = {int(r["id"]): r for r in original.to_dict("records")}
+        kept_ids, added, updated = set(), [], []
+        for row in edited.to_dict("records"):
+            title = str(row.get("Tiêu đề") or "").strip()
+            if not title:
+                continue
+            priority = row.get("Ưu tiên")
+            item = {
+                "ext_id": str(row.get("ID") or "").strip() or None,
+                "title": title,
+                "status": row.get("Trạng thái") or "Mới",
+                "priority": priority if isinstance(priority, str) and priority else None,
+                "category": label_to_key.get(row.get("Nhóm"), "gree_app"),
+                "prod_date": to_date(row.get("Ngày lên Production")) if not pd.isna(row.get("Ngày lên Production")) else None,
+                **{field: str(row.get(col) or "").strip() or None for col, field in text_cols.items()},
+            }
+            if pd.isna(row.get("id")):
+                added.append(item)
+                continue
+            item["id"] = int(row["id"])
+            kept_ids.add(item["id"])
+            old = original_by_id[item["id"]]
+            if any(old[c] != row.get(c) for c in columns[1:-1]):
+                updated.append(item)
+        deleted_ids = [i for i in original_by_id if i not in kept_ids]
+        if db.save_ticket_tracking_changes(added, updated, deleted_ids):
+            st.session_state["_tracking_msg"] = (
+                f"Đã lưu: thêm {len(added)}, sửa {len(updated)}, xóa {len(deleted_ids)}"
+            )
+            st.session_state["_tracking_editor_version"] = version + 1
+            st.rerun()
+
+    # Các lần đổi trạng thái trong tuần đang xem — đúng nội dung sẽ vào báo cáo
+    items_by_id = {i["id"]: i for i in items}
+    week_logs = [l for l in logs if to_date(l.get("created_at")) and start_date <= to_date(l["created_at"]) <= end_date]
+    if week_logs:
+        with st.expander(f"🕑 Đổi trạng thái trong tuần ({len(week_logs)})"):
+            for l in reversed(week_logs):
+                item = items_by_id.get(l["tracking_id"], {})
+                change = f"{l['old_status']} → {l['new_status']}" if l.get("old_status") else f"Thêm mới: {l['new_status']}"
+                st.markdown(
+                    f"- **{to_date(l['created_at']).strftime('%d/%m')}** · {html.escape(str(item.get('ext_id') or ''))} "
+                    f"{html.escape(str(item.get('title') or '').splitlines()[0] if item.get('title') else '')} — {change}"
+                )
 
 def render_ai_notes_paste_box():
     """Dán JSON do AI tổng hợp (ChatGPT/Claude trên web...) → đưa vào hàng chờ duyệt."""
@@ -2329,8 +2689,15 @@ elif page == "📈 Báo cáo tuần của Nam":
         f"(Tuần {report_week} tháng {report_month}/{report_year})"
     )
 
+    status_kind, status_text = report_email_status(app_settings, db.get_report_email_logs(), start_date, end_date)
+    getattr(st, status_kind)(f"📧 Email báo cáo tuần này: {status_text}")
+
     # Số liệu báo cáo dựng bằng hàm dùng chung với chức năng gửi email tự động
-    base_ctx = build_report_context(report_year, report_month, report_week, reporter_name, db_tickets, db_tasks, db.get_work_notes())
+    tracking_items, tracking_logs = db.get_ticket_tracking(), db.get_ticket_tracking_logs()
+    base_ctx = build_report_context(
+        report_year, report_month, report_week, reporter_name, db_tickets, db_tasks, db.get_work_notes(),
+        tracking=tracking_items, tracking_logs=tracking_logs,
+    )
     week_new_tickets = base_ctx["week_new_tickets"]
     week_completed_tasks = base_ctx["week_completed_tasks"]
     summary_rows = base_ctx["summary_rows"]
@@ -2378,7 +2745,27 @@ elif page == "📈 Báo cáo tuần của Nam":
         "của đúng dòng ERP / Bảo hành / Gree App / IT cơ bản trong file mẫu. Ghi nhanh hằng ngày ở sidebar, "
         "hoặc thêm/sửa/xóa trực tiếp trong bảng dưới rồi bấm Lưu."
     )
-    render_work_notes_editor(base_ctx["week_notes"], start_date, end_date)
+    render_work_notes_list(base_ctx["week_notes"])
+    with st.expander("✏️ Thêm / sửa hàng loạt dạng bảng"):
+        st.caption("Thêm dòng ở cuối bảng; xóa: tick ô đầu dòng rồi bấm biểu tượng thùng rác trên bảng → bấm Lưu.")
+        render_work_notes_editor(base_ctx["week_notes"], start_date, end_date)
+
+    st.divider()
+    st.subheader("🎯 Theo dõi ticket (AEGONA...)")
+    st.caption(
+        "Danh sách ticket bên ngoài cần follow theo trạng thái. Sửa trực tiếp trong bảng (đổi trạng thái, ưu tiên, "
+        "ngày lên Production...) rồi bấm Lưu. Báo cáo tuần ghi mục **Theo dõi ticket** vào đúng dòng Nhóm: các mục còn mở "
+        "+ mục đổi trạng thái trong tuần, dạng `dd/mm: #ID – Tiêu đề – Trạng thái`."
+    )
+    render_ticket_tracking_editor(tracking_items, tracking_logs, start_date, end_date)
+    st.download_button(
+        f"📊 Xuất Excel theo dõi ticket tuần {report_week}/tháng {report_month} ({len(base_ctx['week_tracking'])} mục)",
+        data=generate_tracking_excel(base_ctx),
+        file_name=f"NAMLE - THEO DOI TICKET - TUAN {report_week:02d} THANG {report_month:02d}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="btn_export_tracking_xlsx",
+    )
+    render_tracking_import_box(tracking_items)
     issues = st.text_area("Vấn đề gặp phải / Rủi ro cần lưu ý", placeholder="Nhập các vấn đề nếu có...")
 
     st.divider()
@@ -2569,6 +2956,24 @@ elif page == "⚙️ Cài đặt":
         if cfg.get("report_email_last_error"):
             st.error(f"Lỗi lần gửi gần nhất: {cfg.get('report_email_last_error')}")
 
+        st.markdown("##### 🗂️ Lịch sử gửi theo tuần")
+        email_logs = db.get_report_email_logs()
+        if email_logs:
+            history = []
+            for l in email_logs:
+                d = to_date(l["target_date"])
+                history.append({
+                    "Tuần": f"Tuần {week_of_month(d)} - T{d.month:02d}/{d.year}",
+                    "Thời điểm": l["created_at"].strftime("%d/%m/%Y %H:%M"),
+                    "Kết quả": "✅ Đã gửi" if l["status"] == "sent" else "❌ Lỗi",
+                    "Cách gửi": "Tự động" if l["trigger_type"] == "auto" else "Gửi ngay",
+                    "Người nhận": l.get("recipients") or "",
+                    "Chi tiết": l.get("message") or "",
+                })
+            st.dataframe(pd.DataFrame(history), hide_index=True, width="stretch")
+        else:
+            st.caption("Chưa có lần gửi nào được ghi nhận.")
+
         st.info(
             "⚠️ **Lưu ý về độ chính xác của giờ gửi:** Streamlit Cloud cho app ngủ khi không có ai truy cập, "
             "nên hệ thống kiểm tra lịch mỗi lần có người mở app. Nếu qua giờ hẹn mà cả ngày không ai vào app, "
@@ -2606,7 +3011,7 @@ elif page == "⚙️ Cài đặt":
             ms, _ = timed(lambda: mysql.connector.connect(**db.DB_CONFIG).close())
             rows.append({"Bước": "Mở kết nối SSL mới (không qua pool)", "Thời gian (ms)": round(ms)})
             total_db = 0
-            for name in ["get_all_tickets", "get_tasks", "get_settings", "get_work_notes", "get_work_note_drafts"]:
+            for name in ["get_all_tickets", "get_tasks", "get_settings", "get_work_notes", "get_work_note_drafts", "get_ticket_tracking", "get_ticket_tracking_logs", "get_report_email_logs"]:
                 fn = getattr(db, name)
                 fn.clear()
                 ms, data = timed(fn)

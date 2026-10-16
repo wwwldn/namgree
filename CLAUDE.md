@@ -3,8 +3,13 @@
 Đọc thêm `CONTEXT.md` (mục tiêu dự án, quy tắc code, chi tiết DB/deploy) và `.cursorrules`.
 
 ## Môi trường
-- Production: Streamlit Cloud `https://namgree.streamlit.app/` — push lên `main` là tự deploy.
-- DB: TiDB Cloud Serverless (MySQL-compatible, v8.5), port 4000, bắt buộc SSL. Thông tin đăng nhập trong Streamlit Secrets / `.streamlit/secrets.toml` (local, gitignore).
+- **Đang chuyển (16/10/2026) sang chạy trên máy bàn của Nam: `https://gree.leducnam.com`** (A record → IP nhà 14.161.26.1).
+  - Apache XAMPP (chạy từ XAMPP Control Panel, không phải service) proxy https → Streamlit `127.0.0.1:8501`. Cấu hình: `deploy/apache-gree.leducnam.com.conf` → copy sang `E:\xampp\apache\conf\extra\httpd-gree-leducnam.conf`. HTTPS do mod_md (Let's Encrypt) tự xin.
+  - Streamlit: Task Scheduler "NamLeGree Streamlit" chạy `deploy/run_local.bat` khi đăng nhập Windows; log `logs/streamlit.log`. Sửa code (cả `db.py`) → End/Run lại task này.
+  - DB: MariaDB 11.3 local, DB `namgree`, user `namgree_app` (mật khẩu trong `.streamlit/secrets.toml`). Bản TiDB cũ: `D:\NAMLE\backup_namlegree\secrets_tidb.toml`. DB `namlegree` trên máy là bản thử cũ — không dùng.
+  - Backup: Task Scheduler "NamLeGree Backup DB" chạy `deploy/backup_db.py` 12:30 hằng ngày → `D:\NAMLE\backup_namlegree\daily\` (giữ 30 ngày).
+  - `db.py` ép collation `utf8mb4_unicode_ci` (MariaDB không có `utf8mb4_0900_ai_ci`, lỗi 1273). Dump từ TiDB phải đổi collation đó trước khi import vào MariaDB; `mysqldump` TiDB không dùng `--single-transaction` (lỗi SAVEPOINT).
+- Cũ: Streamlit Cloud `https://namgree.streamlit.app/` (push `main` tự deploy) + TiDB Cloud Serverless (MySQL v8.5, port 4000, bắt buộc SSL), thông tin trong Streamlit Secrets.
 - Không có `.streamlit/secrets.toml` thì `db.py` tự dùng MySQL localhost.
 - Kết nối thử từ máy: `"/e/MariaDB 11.3/bin/mysql" -h <host> -P 4000 -u <user> --ssl <db>` (đặt mật khẩu qua biến `MYSQL_PWD`).
 
@@ -24,5 +29,6 @@
 - Đổi trạng thái ticket chỉ qua `db.update_ticket_status()` / `db.complete_ticket()` — hai hàm này ghi `closed_at` và dòng log `type='status'`. Không UPDATE `tickets.status` trực tiếp.
 - Báo cáo tuần = ticket (theo Form/domain) + bảng `work_notes` (ghi chú việc ngoài ticket, nhóm `erp`/`warranty`/`gree_app`/`it` ↔ 4 dòng file mẫu, xem `WORK_NOTE_CATEGORIES` trong `app.py`). Ticket chỉ dùng thống kê yêu cầu online — không tạo ticket cho việc tự follow.
 - Code mới gọi DB: dùng `get_connection()` trong `db.py`, xử lý trường hợp trả về `None`; sau khi ghi dữ liệu gọi `.clear()` cache tương ứng (`get_all_tickets`, `get_tasks`, `get_settings`). `get_connection()` lấy từ pool → luôn `conn.close()` để trả kết nối.
+- Theo dõi ticket bên ngoài (AEGONA...): bảng `ticket_tracking` + log đổi trạng thái `ticket_tracking_logs`. Chỉ ghi qua `db.save_ticket_tracking_changes()` (tự ghi `status_changed_at` + log) — báo cáo tuần chỉ ghi `dd/mm: #ID – Tiêu đề – Trạng thái` (ngày lấy từ log đổi trạng thái). Nguồn dữ liệu là file Excel log cập nhật hệ thống Gree App (sheet `Logs`): cập nhật bằng `python tracking_import.py <file.xlsx>` (thử trước `--dry-run`) hoặc ô tải file trên trang Báo cáo tuần. Sửa `tracking_import.py` thì phải Reboot app (lỗi 8).
 - **AI nạp nội dung báo cáo tuần (ngoài ticket):** không INSERT thẳng `work_notes`. Soạn JSON `{"week_start": "YYYY-MM-DD", "notes": [{"date", "category": erp|warranty|gree_app|it, "content"}]}` rồi chạy `python ai_notes.py <file.json>` (thử trước với `--dry-run`) → vào bảng `work_note_drafts` chờ duyệt. Người dùng duyệt ở trang "Báo cáo tuần" thì mới chuyển sang `work_notes`. Nội dung nên viết ngắn gọn kiểu gạch đầu dòng, mỗi dòng 1 việc.
 - Khi gặp lỗi mới: thêm vào mục "Lỗi đã gặp" ở trên (ngày, thông báo lỗi, nguyên nhân, cách sửa).
