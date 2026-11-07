@@ -6,6 +6,7 @@ import ssl
 from email.message import EmailMessage
 
 DOCX_MIME = ("application", "vnd.openxmlformats-officedocument.wordprocessingml.document")
+PDF_MIME = ("application", "pdf")
 
 
 def parse_recipients(raw):
@@ -32,9 +33,11 @@ def validate_smtp_config(cfg):
     return missing
 
 
-def send_email(cfg, to_list, cc_list, subject, body, attachment=None, attachment_name=None):
+def send_email(cfg, to_list, cc_list, subject, body, attachment=None, attachment_name=None, attachments=None):
     """Gửi 1 email. cfg: dict host/port/user/password/sender/sender_name/security.
-    attachment: bytes nội dung file (tùy chọn). Ném exception nếu gửi thất bại."""
+    attachment: bytes nội dung file .docx (tùy chọn, cách gọi cũ).
+    attachments: list (bytes, tên file, (maintype, subtype)) để đính kèm nhiều file.
+    Ném exception nếu gửi thất bại."""
     missing = validate_smtp_config(cfg)
     if missing:
         raise ValueError("Thiếu cấu hình SMTP: " + ", ".join(missing))
@@ -53,13 +56,11 @@ def send_email(cfg, to_list, cc_list, subject, body, attachment=None, attachment
     msg["Subject"] = subject
     msg.set_content(body)
 
+    files = list(attachments or [])
     if attachment:
-        msg.add_attachment(
-            attachment,
-            maintype=DOCX_MIME[0],
-            subtype=DOCX_MIME[1],
-            filename=attachment_name or "BaoCao.docx",
-        )
+        files.insert(0, (attachment, attachment_name or "BaoCao.docx", DOCX_MIME))
+    for data, name, (maintype, subtype) in files:
+        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=name)
 
     port = int(cfg["port"])
     security = (cfg.get("security") or "STARTTLS").upper()

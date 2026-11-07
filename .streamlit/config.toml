@@ -1,0 +1,6 @@
+# Chữ đậm màu hơn mặc định (bảng dữ liệu vẽ bằng canvas trông mờ với màu xám mặc định).
+# Chỉ chỉnh giao diện sáng; giao diện tối giữ mặc định của Streamlit.
+[theme.light]
+textColor = "#0F172A"
+dataframeHeaderBackgroundColor = "#E8EEFB"
+dataframeBorderColor = "#CBD5E1"

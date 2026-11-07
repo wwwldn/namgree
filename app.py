@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import altair as alt
 import json
 import os
 import datetime
@@ -9,6 +10,7 @@ import calendar
 import io
 import re
 import html
+import copy
 from config import Config
 import db
 import mailer
@@ -21,10 +23,19 @@ import mysql.connector
 if getattr(db, "LOADED_MTIME", None) != os.path.getmtime(db.__file__):
     db = importlib.reload(db)
 from ai_notes import parse_notes_json
-from tracking_import import parse_tracking_xlsx, match_tracking
+import tracking_import
+import agn_report_pdf
+if getattr(agn_report_pdf, "LOADED_MTIME", None) != os.path.getmtime(agn_report_pdf.__file__):
+    importlib.reload(agn_report_pdf)
+if getattr(tracking_import, "LOADED_MTIME", None) != os.path.getmtime(tracking_import.__file__):
+    importlib.reload(tracking_import)
+from tracking_import import (parse_tracking_xlsx, match_tracking, describe_change, normalize_ext_id, _same as same_value,
+                             MONTH_TOTALS_KEY, merge_month_totals)
 
 try:
     from docx import Document
+    from docx.table import _Row, _Cell
+    from docx.oxml.ns import qn
     from docx.shared import Pt
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     DOCX_AVAILABLE = True
@@ -210,11 +221,13 @@ def apply_pending_admin_cookie():
 # -----------------
 # Đường dẫn logo (đặt file logo.png vào thư mục static/ cạnh app.py)
 LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "logo.png")
+# Favicon: logo chữ G chung với HUB (đen) / GreeFastAPI (đỏ), NamGree dùng màu tím để dễ phân biệt tab
+FAVICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "favicon.png")
 
 # Thiết lập cấu hình trang
 st.set_page_config(
     page_title=Config.APP_NAME,
-    page_icon=LOGO_PATH if os.path.exists(LOGO_PATH) else "🏠",
+    page_icon=FAVICON_PATH if os.path.exists(FAVICON_PATH) else "🏠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -242,10 +255,17 @@ WORK_NOTE_CATEGORIES = {
 WORK_NOTE_LABELS = {key: label for key, (label, _) in WORK_NOTE_CATEGORIES.items()}
 
 # Theo dõi ticket bên ngoài (AEGONA...) theo trạng thái — thứ tự dùng để sắp xếp bảng
-TRACKING_STATUSES = ["Mới", "Chờ đề xuất", "Đang thực hiện", "Chờ cập nhật", "Đã lên Production", "Đóng", "Hủy"]
+TRACKING_STATUSES = ["Mới", "Chờ đề xuất", "Đang thực hiện", "Đang testing", "Chờ deploy", "Chờ cập nhật", "Đã lên Production", "Đóng", "Hủy"]
 # Mục đã đóng chỉ vào báo cáo tuần nếu đổi trạng thái trong tuần đó
 TRACKING_CLOSED = {"Đóng", "Hủy"}
 TRACKING_PRIORITIES = ["Cao", "Trung bình", "Thấp"]
+# Hợp đồng bảo trì AEGONA: hạn mức giờ/tháng (sheet Overview của file báo cáo) và quy đổi MD (man-day)
+# Gói bảo trì 1 năm: 288 giờ, ký 14/07/2026 (hết hạn 13/07/2027), chia đều 12 tháng T7/2026 → T6/2027 = 24 giờ/tháng
+AGN_PACKAGE_HOURS = 288
+AGN_CONTRACT_SIGNED = datetime.date(2026, 7, 14)
+AGN_CONTRACT_MONTHS = 12
+AGN_MONTHLY_QUOTA_HOURS = AGN_PACKAGE_HOURS // AGN_CONTRACT_MONTHS
+HOURS_PER_MD = 8
 
 # Trạng thái coi như đã đóng — dùng để đẩy ticket chưa xong lên đầu danh sách
 CLOSED_STATUSES = {"Hoàn thành", "Từ chối"}
@@ -858,6 +878,7 @@ def build_report_context(year, month, week, reporter, tickets, tasks, notes=(), 
         "completed_rows": completed_rows,
         "week_notes": week_notes,
         "week_tracking": week_tracking,
+        "tracking": list(tracking),
         "issues": issues,
         "week_relevant_tickets": week_relevant_tickets,
         "week_new_tickets": week_new_tickets,
@@ -1015,11 +1036,23 @@ def _send_weekly_report_email(settings, tickets, tasks, target_date, mark_sent):
         return False, f"Lỗi khi tạo file báo cáo từ mẫu: {e}"
 
     filename = f"NAMLE - BC-TUAN {week:02d} THANG {month:02d}.docx"
+    attachments = []
+    pdf_note = ""
+    try:
+        pdf_bytes = build_agn_pdf_bytes(ctx["tracking"])
+        if pdf_bytes:
+            attachments.append((pdf_bytes, f"NAMLE - BAO CAO AEGONA - TUAN {week:02d} THANG {month:02d}.pdf", mailer.PDF_MIME))
+    except Exception as e:  # PDF lỗi vẫn gửi file Word, ghi chú lại trong email
+        pdf_note = f"\n(Không tạo được file PDF AEGONA: {e})\n"
     period = f"{ctx['start_date'].strftime('%d/%m/%Y')} - {ctx['end_date'].strftime('%d/%m/%Y')}"
     subject = f"[Gree IT] Báo cáo tuần {week:02d}/tháng {month:02d}/{year} - {ctx['reporter']}"
     body = (
         f"Kính gửi Anh/Chị,\n\n"
-        f"Báo cáo công việc tuần {week} tháng {month}/{year} ({period}) được đính kèm trong email này.\n\n"
+        f"Báo cáo công việc tuần {week} tháng {month}/{year} ({period}) được đính kèm trong email này:\n"
+        f"- {filename}: báo cáo công việc tuần theo mẫu công ty\n"
+        + (f"- {attachments[0][1]}: báo cáo gói bảo trì AEGONA (ticket chưa triển khai, đã triển khai, giờ theo tháng)\n"
+           if attachments else "")
+        + pdf_note + "\n"
         f"Người báo cáo: {ctx['reporter']}\n\n"
         f"(Email được gửi tự động từ hệ thống {Config.APP_NAME}.)"
     )
@@ -1027,7 +1060,7 @@ def _send_weekly_report_email(settings, tickets, tasks, target_date, mark_sent):
     try:
         mailer.send_email(
             smtp_config_from_settings(settings), to_list, cc_list,
-            subject, body, buffer.getvalue(), filename,
+            subject, body, buffer.getvalue(), filename, attachments=attachments,
         )
     except Exception as e:
         db.save_settings({
@@ -1161,15 +1194,15 @@ def generate_weekly_report_docx(ctx):
         note_lines = build_note_lines([n for n in ctx['week_notes'] if n.get('category') == category])
         if note_lines:
             doc.add_paragraph().add_run(f"{label}:").bold = True
-            for text, _ in note_lines:
-                doc.add_paragraph(text)
+            for text, bold in note_lines:
+                add_report_runs(doc.add_paragraph(), text, bold)
 
     doc.add_heading("5. Theo dõi ticket (trạng thái)", level=2)
     tracking_lines = build_tracking_lines(ctx.get('week_tracking', []))
     if not tracking_lines:
         doc.add_paragraph("(Không có)")
-    for text, _ in tracking_lines:
-        doc.add_paragraph(text)
+    for text, bold in tracking_lines:
+        add_report_runs(doc.add_paragraph(), text, bold)
 
     doc.add_heading("6. Vấn đề gặp phải / Lưu ý", level=2)
     doc.add_paragraph(ctx['issues'].strip() if ctx['issues'] else "(Không có)")
@@ -1194,7 +1227,7 @@ def build_ticket_report_line(t, cfg):
     detail = " - ".join(detail_parts) if detail_parts else t.get("subject", "")
     requester = t.get("requester", "")
     status = t.get("status", "")
-    return f"{day_prefix(t.get('created_at'))}{t.get('id', '')} – {detail} ({requester}) – {status}."
+    return f"- {day_prefix(t.get('created_at'))}{t.get('id', '')} – {detail} ({requester}) – {status}."
 
 def day_prefix(value):
     """'dd/mm: ' đặt ở đầu mỗi dòng báo cáo (rỗng nếu không có ngày)."""
@@ -1243,11 +1276,12 @@ def build_tracking_lines(items):
         lines.append((text, False))
     return lines
 
-def build_report_row_lines(ctx, category):
-    """Nội dung cột 'Các công việc thực hiện' của 1 dòng báo cáo: ticket theo Form (như cũ)
-    + mục 'Công việc khác' lấy từ ghi chú công việc của nhóm đó."""
+def build_report_row_lines(ctx, category, tracking=None):
+    """Nội dung việc đã làm của 1 nhóm (ERP / Bảo hành / Gree App / IT): ticket theo Form
+    + mục 'Theo dõi ticket' (tracking, mặc định ctx['week_tracking']) + 'Công việc khác' từ ghi chú công việc."""
     lines = build_domain_section_lines(ctx['week_relevant_tickets'], category)
-    tracking_lines = build_tracking_lines([i for i in ctx.get('week_tracking', []) if i.get('category') == category])
+    tracking = ctx.get('week_tracking', []) if tracking is None else tracking
+    tracking_lines = build_tracking_lines([i for i in tracking if i.get('category') == category])
     category_notes = [n for n in ctx.get('week_notes', []) if n.get('category') == category]
     note_lines = build_note_lines(category_notes)
     extra_sections = [(title, extra) for title, extra in (("Theo dõi ticket", tracking_lines), ("Công việc khác", note_lines)) if extra]
@@ -1259,6 +1293,32 @@ def build_report_row_lines(ctx, category):
         lines.extend(extra)
     return lines
 
+# Dòng báo cáo dạng '- dd/mm: nội dung' → tách phần ngày để in đậm
+DATED_LINE_RE = re.compile(r"^(- )(\d{2}/\d{2})(:.*)$", re.DOTALL)
+
+def add_report_runs(paragraph, text, bold):
+    """Ghi 1 dòng báo cáo vào paragraph; dòng '- dd/mm: ...' thì in đậm phần ngày."""
+    m = None if bold else DATED_LINE_RE.match(text)
+    if not m:
+        paragraph.add_run(text).bold = bold
+        return
+    paragraph.add_run(m.group(1))
+    paragraph.add_run(m.group(2)).bold = True
+    paragraph.add_run(m.group(3))
+
+def report_lines_markdown(lines):
+    """Xem trước nội dung báo cáo trên web: tiêu đề mục in đậm, ngày đầu dòng in đậm."""
+    out = []
+    for text, bold in lines:
+        safe = html.escape(text).replace("*", "\\*").replace("_", "\\_")
+        if bold:
+            # Dòng trống trước/sau để tiêu đề mục không dính vào danh sách phía trên
+            out.extend(["", f"**{safe}**", ""])
+            continue
+        m = DATED_LINE_RE.match(safe)
+        out.append(f"- **{m.group(2)}**{m.group(3)}" if m else safe)
+    return "\n".join(out)
+
 def set_cell_lines(cell, lines):
     """Ghi nội dung mới vào 1 cell (list (text, bold)), mỗi tuple thành 1 paragraph riêng.
     Giữ định dạng (font) gốc của cell bằng cách tái sử dụng đoạn/run đầu tiên."""
@@ -1268,15 +1328,19 @@ def set_cell_lines(cell, lines):
     base_p = cell.paragraphs[0]
     for r in list(base_p.runs):
         r._element.getparent().remove(r._element)
+    # Bỏ gạch đầu dòng tự động của file mẫu (mẫu mới để sẵn list) — nội dung đã tự có "- " ở đầu dòng
+    p_pr = base_p._p.pPr
+    if p_pr is not None and p_pr.numPr is not None:
+        p_pr.remove(p_pr.numPr)
+        for tag in ("w:ind", "w:pStyle"):  # thụt lề / kiểu "List Paragraph" đi kèm gạch đầu dòng
+            for el in p_pr.findall(qn(tag)):
+                p_pr.remove(el)
     if not lines:
         return
     first_text, first_bold = lines[0]
-    run = base_p.add_run(first_text)
-    run.bold = first_bold
+    add_report_runs(base_p, first_text, first_bold)
     for text, bold in lines[1:]:
-        p = cell.add_paragraph()
-        r = p.add_run(text)
-        r.bold = bold
+        add_report_runs(cell.add_paragraph(), text, bold)
 
 def replace_paragraph_text(paragraph, new_text):
     """Thay toàn bộ nội dung 1 paragraph, giữ định dạng (font/bold/size) của run đầu tiên."""
@@ -1298,13 +1362,123 @@ def update_title_paragraphs(doc, week, month, year, reporter):
         elif reporter_pattern.match(p.text.strip()):
             replace_paragraph_text(p, f"Tên nhân viên báo cáo: {reporter}")
 
-def find_main_content_table(doc):
-    """Tìm bảng (kể cả lồng trong cell khác) có cột tiêu đề 'Các công việc thực hiện'."""
+# Ticket AEGONA chưa triển khai trong báo cáo tuần: nguyên nhân chưa xong / bước tiếp theo, theo trạng thái theo dõi
+AGN_PENDING_REASON = {
+    "Mới": "Chưa bắt đầu thực hiện",
+    "Chờ đề xuất": "Đang chờ chốt đề xuất / phê duyệt",
+    "Đang thực hiện": "AEGONA đang thực hiện, chưa bàn giao",
+    "Đang testing": "Đang kiểm thử, chưa đủ điều kiện triển khai",
+    "Chờ deploy": "Chờ lịch triển khai lên Production",
+    "Chờ cập nhật": "Chờ cập nhật lên hệ thống",
+}
+AGN_NEXT_STEP = {
+    "Mới": "Gửi yêu cầu, AEGONA đánh giá ETA",
+    "Chờ đề xuất": "Chốt đề xuất & phê duyệt để AEGONA triển khai",
+    "Đang thực hiện": "AEGONA hoàn thành, bàn giao kiểm thử",
+    "Đang testing": "Hoàn tất kiểm thử, chuyển triển khai",
+    "Chờ deploy": "Triển khai lên Production",
+    "Chờ cập nhật": "Cập nhật lên hệ thống",
+}
+PLAN_WEEKDAY_COLS = 6  # cột T2 → T7 của bảng Kế hoạch tuần sau
+
+def agn_requested_date(item):
+    """Ngày ticket AEGONA được nêu ra (ngày yêu cầu; thiếu thì ngày bắt đầu / ngày tạo)."""
+    return to_date(item.get("requested_at")) or to_date(item.get("start_date")) or to_date(item.get("created_at"))
+
+def agn_item_label(item):
+    ext = str(item.get("ext_id") or "").strip()
+    if ext and not ext.startswith("#"):
+        ext = f"#{ext}"
+    title = "; ".join(part.strip() for part in str(item.get("title") or "").splitlines() if part.strip() not in ("", "--"))
+    return f"{ext} – {title}" if ext else title
+
+def build_weekly_sections(ctx):
+    """Nội dung báo cáo tuần theo mẫu 'BÁO CÁO CÔNG VIỆC HÀNG TUẦN QUẢN TRỊ HỆ THỐNG IT'.
+    I.1 Tóm tắt chung · I.2 Công việc đã thực hiện · I.3 Đang tiến hành/dở dang · II Tuần trước chưa giải quyết · III Kế hoạch.
+    Ticket AEGONA chưa triển khai (có giờ, chưa Đóng/lên Production): nêu TRONG tuần → I.3, nêu TRƯỚC tuần → II,
+    tất cả → III."""
+    start, end = ctx["start_date"], ctx["end_date"]
+    next_monday = start + datetime.timedelta(days=7)
+    next_saturday = next_monday + datetime.timedelta(days=5)
+    next_week_text = f"{next_monday:%d/%m}-{next_saturday:%d/%m/%Y}"
+    time_text = f"{start:%d/%m}-{end:%d/%m/%Y}"
+
+    stats = agn_package_stats(ctx.get("tracking") or [])
+    pending = [i for i in (stats["pending_items"] if stats else []) if (agn_requested_date(i) or start) <= end]
+    pending_ids = {i["id"] for i in pending}
+    carried = [i for i in pending if agn_requested_date(i) and agn_requested_date(i) < start]
+    carried_ids = {i["id"] for i in carried}
+    new_pending = [i for i in pending if i["id"] not in carried_ids]
+
+    week_tracking = ctx.get("week_tracking", [])
+    finished = TRACKING_CLOSED | set(AGN_DEPLOYED_STATUSES)
+    done_tracking = [i for i in week_tracking if i.get("status") in finished and i.get("week_logs")]
+    moving = [i for i in week_tracking if i.get("status") not in finished and i.get("week_logs") and i["id"] not in pending_ids]
+
+    # I.2 — việc đã làm, nhóm theo hệ thống
+    done = []
+    for category, (_, heading) in WORK_NOTE_CATEGORIES.items():
+        lines = build_report_row_lines(ctx, category, tracking=done_tracking)
+        if lines:
+            done.append((f"{heading}:", True))
+            done.extend(lines)
+
+    # I.3 — đang tiến hành / dở dang
+    doing = []
+    open_tickets = [t for t in ctx.get("week_relevant_tickets", []) if t.get("status") not in CLOSED_STATUSES]
+    if open_tickets:
+        doing.append(("Ticket hỗ trợ đang xử lý:", True))
+        doing += [(f"- {day_prefix(t.get('created_at'))}{t.get('id')} – {t.get('subject') or ''} ({t.get('requester') or ''})"
+                   f" – {t.get('status')}", False) for t in sort_tickets_for_display(open_tickets)]
+    if new_pending:
+        doing.append(("AEGONA – chưa triển khai (yêu cầu trong tuần):", True))
+        doing += [(f"- {day_prefix(agn_requested_date(i))}{agn_item_label(i)} – {i.get('status')} ({agn_item_hours(i):.2f} giờ)", False)
+                  for i in new_pending]
+    if moving:
+        doing.append(("AEGONA – ticket đang mở có cập nhật trong tuần:", True))
+        doing += build_tracking_lines(moving)
+
+    # I.1 — tóm tắt chung (số liệu)
+    week_tickets = ctx.get("week_relevant_tickets", [])
+    by_domain = " · ".join(f"{label} {n}" for label, n in (
+        (WORK_NOTE_LABELS[c], len([t for t in week_tickets if ticket_domain(t) == c])) for c in ("erp", "warranty", "gree_app")) if n)
+    summary = [(f"- Ticket hỗ trợ: {len(ctx.get('week_new_tickets', []))} tiếp nhận mới, "
+                f"{len(ctx.get('week_completed_tasks', []))} hoàn thành, {len(open_tickets)} đang xử lý"
+                + (f" ({by_domain})." if by_domain else "."), False)]
+    if stats:
+        summary.append((f"- Gói bảo trì AEGONA (tới {stats['today']:%d/%m}): đã dùng {stats['used']:.2f}/{stats['quota']:g} giờ "
+                        f"({stats['used_pct']:.1f}%) — đã triển khai {stats['deployed']:.2f} giờ, chưa triển khai "
+                        f"{stats['pending']:.2f} giờ ({len(stats['pending_items'])} ticket). Chi tiết: file PDF đính kèm.", False))
+        summary.append((f"- Ticket AEGONA: {len(done_tracking)} đóng/triển khai trong tuần, {len(stats['open_items'])} đang mở.", False))
+    issues = str(ctx.get("issues") or "").strip()
+    if issues:
+        summary.append(("Sự cố / vấn đề:", True))
+        summary += [(f"- {line.strip().lstrip('-+•').strip()}", False) for line in issues.splitlines() if line.strip()]
+
+    def due_text(item):
+        d = to_date(item.get("end_date"))
+        return f"{d:%d/%m/%Y}" if d and d > end else f"tuần sau ({next_week_text})"
+
+    carried_rows = [{
+        "content": agn_item_label(i) + (f" ({i['system_name']})" if i.get("system_name") else ""),
+        "status": f"{i.get('status')} – {agn_item_hours(i):.2f} giờ" + (f" (AEGONA: {i['agn_status']})" if i.get("agn_status") else ""),
+        "reason": AGN_PENDING_REASON.get(i.get("status"), "Chưa hoàn tất"),
+        "next": f"{AGN_NEXT_STEP.get(i.get('status'), 'Tiếp tục theo dõi')} – dự kiến: {due_text(i)}",
+    } for i in carried]
+    plan_rows = [{
+        "content": agn_item_label(i),
+        "goal": AGN_NEXT_STEP.get(i.get("status"), "Tiếp tục theo dõi"),
+        "require": "Triển khai lên hệ thống, đóng ticket",
+    } for i in pending]
+    return {"summary": summary, "done": done, "doing": doing, "carried": carried_rows, "plan": plan_rows,
+            "time_text": time_text, "next_week_text": next_week_text}
+
+def find_table_with_header(doc, header_text, header_rows=1):
+    """Tìm bảng (kể cả lồng trong cell khác) có ô tiêu đề (trong header_rows dòng đầu) chứa header_text."""
     def search(tables):
         for tbl in tables:
-            if tbl.rows:
-                header_texts = [c.text.strip() for c in tbl.rows[0].cells]
-                if "Các công việc thực hiện" in header_texts:
+            for row in tbl.rows[:header_rows]:
+                if any(header_text in c.text for c in row.cells):
                     return tbl
             for row in tbl.rows:
                 for cell in row.cells:
@@ -1314,8 +1488,20 @@ def find_main_content_table(doc):
         return None
     return search(doc.tables)
 
+def own_cells(row, table):
+    """Các ô THẬT của 1 dòng (mỗi <w:tc> 1 ô, ô gộp ngang chỉ tính 1 lần). Bỏ gộp dọc (vMerge) của dòng này:
+    file mẫu mới để ô dòng dữ liệu gộp dọc với ô tiêu đề, row.cells sẽ trả về ô tiêu đề → ghi đè tiêu đề."""
+    cells = []
+    for tc in row._tr.tc_lst:
+        tc_pr = tc.tcPr
+        if tc_pr is not None:
+            for v_merge in tc_pr.findall(qn("w:vMerge")):
+                tc_pr.remove(v_merge)
+        cells.append(_Cell(tc, table))
+    return cells
+
 def find_row_by_content(table, keyword, content_col_label="Nội dung"):
-    """Tìm dòng trong bảng mà cột 'Nội dung' chứa keyword (vd: 'HỆ THỐNG BẢO HÀNH')."""
+    """Tìm dòng trong bảng mà cột 'Nội dung' chứa keyword (vd: 'Tóm tắt chung')."""
     header_cells = [c.text.strip() for c in table.rows[0].cells]
     col_idx = header_cells.index(content_col_label) if content_col_label in header_cells else 1
     for row in table.rows[1:]:
@@ -1323,52 +1509,8 @@ def find_row_by_content(table, keyword, content_col_label="Nội dung"):
             return row
     return None
 
-def find_next_week_plan_table(doc):
-    """Tìm bảng 'KẾ HOẠCH CÔNG VIỆC TUẦN SAU' — nhận diện qua cặp cột đặc trưng
-    'Người thực hiện' + 'Ghi chú' (khác với bảng 'Tuần trước chưa giải quyết' dùng
-    'Người giải quyết trực tiếp')."""
-    def search(tables):
-        for tbl in tables:
-            if tbl.rows:
-                header_texts = set()
-                for r in tbl.rows[:2]:
-                    for c in r.cells:
-                        header_texts.add(c.text.strip())
-                if "Người thực hiện" in header_texts and "Ghi chú" in header_texts:
-                    return tbl
-            for row in tbl.rows:
-                for cell in row.cells:
-                    found = search(cell.tables)
-                    if found is not None:
-                        return found
-        return None
-    return search(doc.tables)
-
-def update_next_week_plan_notes(doc, note_text):
-    """Điền khoảng ngày của TUẦN KẾ TIẾP vào cột 'Ghi chú' cho mọi dòng nội dung
-    (1. ERP, 2. Hệ thống Bảo hành...) của bảng Kế hoạch công việc tuần sau."""
-    table = find_next_week_plan_table(doc)
-    if table is None:
-        return False
-    header_cells = [c.text.strip() for c in table.rows[0].cells]
-    if "Ghi chú" not in header_cells:
-        return False
-    ghi_chu_idx = header_cells.index("Ghi chú")
-    content_start = None
-    for ri, row in enumerate(table.rows):
-        if row.cells[0].text.strip().isdigit():
-            content_start = ri
-            break
-    if content_start is None:
-        return False
-    for row in table.rows[content_start:]:
-        set_cell_lines(row.cells[ghi_chu_idx], [(note_text, False)])
-    return True
-
 def update_all_rows_time(table, time_text):
-    """Điền cùng 1 khoảng thời gian vào cột 'T/g giải quyết' cho TẤT CẢ các dòng nội dung
-    (1. ERP, 2. Hệ thống Bảo hành, 3. Gree App, 4. CV IT cơ bản) — chỉ cột thời gian,
-    không đụng tới nội dung công việc của các dòng ngoài Hệ thống Bảo hành."""
+    """Điền khoảng thời gian của tuần vào cột 'T/g giải quyết' cho tất cả các dòng nội dung."""
     header_cells = [c.text.strip() for c in table.rows[0].cells]
     if "T/g giải quyết" not in header_cells:
         return False
@@ -1377,42 +1519,59 @@ def update_all_rows_time(table, time_text):
         set_cell_lines(row.cells[time_idx], [(time_text, False)])
     return True
 
+def fill_rows_from_template(table, template_row, values_list):
+    """Nhân bản template_row cho từng phần tử values_list (list giá trị theo thứ tự ô) rồi bỏ dòng mẫu."""
+    tpl = template_row._tr
+    for values in values_list:
+        tr = copy.deepcopy(tpl)
+        tpl.addprevious(tr)
+        for cell, value in zip(own_cells(_Row(tr, table), table), values):
+            set_cell_lines(cell, [(value, False)] if value else [])
+    tpl.getparent().remove(tpl)
+
+def fill_carried_table(doc, carried_rows):
+    """Bảng 'CÁC CÔNG VIỆC ĐÃ NÊU TUẦN TRƯỚC NHƯNG CHƯA ĐƯỢC GIẢI QUYẾT' (TT · Nội dung · Tình trạng · Nguyên nhân · Hướng xử lý)."""
+    table = find_table_with_header(doc, "Tình trạng hiện tại")
+    if table is None or len(table.rows) < 2:
+        return False
+    values = [[str(n), r["content"], r["status"], r["reason"], r["next"]] for n, r in enumerate(carried_rows, 1)]
+    fill_rows_from_template(table, table.rows[1], values or [["", "Không có công việc tồn đọng từ tuần trước.", "", "", ""]])
+    return True
+
+def fill_plan_table(doc, plan_rows, next_week_text):
+    """Bảng 'KẾ HOẠCH CÔNG VIỆC TUẦN SAU': TT · Nội dung · Mục tiêu · Yêu cầu kết quả · T2..T7 · Ghi chú.
+    Mỗi ticket AEGONA chưa triển khai 1 dòng; dòng trống còn dư của file mẫu được bỏ đi."""
+    table = find_table_with_header(doc, "Mục tiêu / Kết quả kỳ vọng", header_rows=2)
+    if table is None or len(table.rows) < 3 or not plan_rows:
+        return False
+    data_rows = list(table.rows[2:])
+    values = [[str(n), r["content"], r["goal"], r["require"]] + ["x"] * PLAN_WEEKDAY_COLS + [next_week_text]
+              for n, r in enumerate(plan_rows, 1)]
+    template = data_rows[-1]
+    for row in data_rows[:-1]:
+        row._tr.getparent().remove(row._tr)
+    fill_rows_from_template(table, template, values)
+    return True
+
 def generate_weekly_report_from_template(template_path, ctx):
-    """Đổ dữ liệu vào ĐÚNG file mẫu công ty (giữ logo/layout/song ngữ/khung tự đánh giá...),
-    chỉ thay: tiêu đề tuần, tên người báo cáo, cột 'Các công việc thực hiện' của 4 dòng (ticket + ghi chú
-    công việc), cột T/g giải quyết của cả 4 dòng, và cột Ghi chú (thời gian) của bảng Kế hoạch công việc tuần sau."""
+    """Đổ dữ liệu vào ĐÚNG file mẫu công ty (giữ logo/layout/khung tự đánh giá...): tiêu đề tuần, người báo cáo,
+    cột 'Chi tiết thực hiện' + 'T/g giải quyết' của mục I, bảng II (tuần trước chưa giải quyết), bảng III (kế hoạch)."""
     doc = Document(template_path)
-
     update_title_paragraphs(doc, ctx['week'], ctx['month'], ctx['year'], ctx['reporter'])
+    sections = build_weekly_sections(ctx)
 
-    table = find_main_content_table(doc)
+    table = find_table_with_header(doc, "Chi tiết thực hiện")
     if table is None:
-        raise ValueError("Không tìm thấy bảng có cột 'Các công việc thực hiện' trong file mẫu.")
-
-    if find_row_by_content(table, "HỆ THỐNG BẢO HÀNH") is None:
-        raise ValueError("Không tìm thấy dòng 'HỆ THỐNG BẢO HÀNH' trong file mẫu.")
-
+        raise ValueError("Không tìm thấy bảng có cột 'Chi tiết thực hiện' (mục Công việc đã thực hiện trong tuần) trong file mẫu.")
     header_cells = [c.text.strip() for c in table.rows[0].cells]
-    content_idx = header_cells.index("Các công việc thực hiện")
-    for category, (_, row_keyword) in WORK_NOTE_CATEGORIES.items():
-        # Dòng nào file mẫu không có thì bỏ qua, không raise lỗi
-        row = find_row_by_content(table, row_keyword)
-        if row is None:
-            continue
-        lines = build_report_row_lines(ctx, category)
-        if lines:
-            set_cell_lines(row.cells[content_idx], lines)
-        elif category != "it":
-            # Dòng IT cơ bản không có ghi chú thì giữ nguyên nội dung mặc định của file mẫu
-            set_cell_lines(row.cells[content_idx], [("Không có công việc nào trong tuần này.", False)])
-
-    time_text = f"{ctx['start_date'].strftime('%d/%m')}-{ctx['end_date'].strftime('%d/%m')}/{ctx['end_date'].year}"
-    update_all_rows_time(table, time_text)
-
-    next_monday = ctx['start_date'] + datetime.timedelta(days=7)
-    next_saturday = next_monday + datetime.timedelta(days=5)
-    next_week_text = f"{next_monday.strftime('%d/%m')}-{next_saturday.strftime('%d/%m')}/{next_saturday.year}"
-    update_next_week_plan_notes(doc, next_week_text)
+    detail_idx = header_cells.index("Chi tiết thực hiện")
+    for keyword, key in (("Tóm tắt chung", "summary"), ("Công việc đã thực hiện", "done"), ("Công việc đang tiến hành", "doing")):
+        row = find_row_by_content(table, keyword)
+        if row is not None:
+            set_cell_lines(row.cells[detail_idx], sections[key] or [("Không có.", False)])
+    update_all_rows_time(table, sections["time_text"])
+    fill_carried_table(doc, sections["carried"])
+    fill_plan_table(doc, sections["plan"], sections["next_week_text"])
 
     buffer = io.BytesIO()
     doc.save(buffer)
@@ -1737,131 +1896,369 @@ def generate_tracking_excel(ctx):
     return buffer.getvalue()
 
 def render_tracking_import_box(items):
-    """Tải file Excel log cập nhật hệ thống Gree App → xem trước → cập nhật bảng theo dõi (xem tracking_import.py)."""
-    with st.expander("📥 Cập nhật từ file Excel log (sheet Logs)"):
-        st.caption("Lấy các dòng có 'Trạng thái cập nhật' khác trống / Đã cập nhật / Không cập nhật; "
-                   "khớp theo ID AEGONA (không có ID thì theo Tiêu đề). Mục không còn trong file được giữ nguyên.")
+    """Tải file Excel (log cập nhật Gree App hoặc báo cáo tháng của AEGONA) → xem trước → cập nhật bảng theo dõi
+    (xem tracking_import.py)."""
+    with st.expander("📥 Đồng bộ từ file Excel (báo cáo AEGONA / log cập nhật Gree App)"):
+        st.caption(
+            "• **Gree VN x AGN_Maintenance Ticket Report** (sheet July/Aug/Sep/Oct...): lấy mọi ticket kèm giờ ETA/thực tế "
+            "và tháng tính giờ → MD theo tháng. Tiêu đề/nội dung đã có thì giữ nguyên.  \n"
+            "• **GreeApp System Update Log** (sheet Logs): lấy các dòng còn theo dõi, đổi trạng thái theo file.  \n"
+            "Khớp theo ID AEGONA (không có ID thì theo Tiêu đề). Mục không còn trong file được giữ nguyên."
+        )
         upload = st.file_uploader("File .xlsx", type=["xlsx"], key="tracking_xlsx", label_visibility="collapsed")
         if upload is None:
             return
-        file_items, errors = parse_tracking_xlsx(io.BytesIO(upload.getvalue()))
+        file_items, errors, source, month_totals = parse_tracking_xlsx(io.BytesIO(upload.getvalue()))
         if errors:
             st.error("\n".join(errors))
             return
-        added, updated = match_tracking(file_items, items)
-        st.write(f"File có **{len(file_items)}** mục đang theo dõi → thêm **{len(added)}**, cập nhật **{len(updated)}**.")
+        update_status = None
+        if source == "agn":
+            update_status = st.checkbox(
+                "Đổi cả Trạng thái của mục đã có theo trạng thái AEGONA (Closed → Đóng, Ready to deploy → Chờ deploy...)",
+                value=False, key="tracking_import_status",
+                help="Bỏ chọn: giữ trạng thái bạn đang theo dõi, chỉ cập nhật giờ/tháng/trạng thái AEGONA. Mục mới luôn lấy theo file.",
+            )
+        added, updated = match_tracking(file_items, items, source, update_status=update_status)
+        kind = "báo cáo AEGONA" if source == "agn" else "log cập nhật Gree App"
+        st.write(f"File **{kind}** có **{len(file_items)}** mục → thêm **{len(added)}**, cập nhật **{len(updated)}**.")
         by_id = {i["id"]: i for i in items}
         preview = [
             {"Thao tác": "Thêm", "ID": a.get("ext_id") or "", "Tiêu đề": a["title"], "Thay đổi": a["status"]} for a in added
         ] + [
             {"Thao tác": "Cập nhật", "ID": by_id[u["id"]].get("ext_id") or "", "Tiêu đề": by_id[u["id"]]["title"],
-             "Thay đổi": f"{by_id[u['id']]['status']} → {u['status']}" if "status" in u
-                         else ", ".join(f for f in u if f != "id")}
+             "Thay đổi": describe_change(by_id[u["id"]], u)}
             for u in updated
         ]
         if preview:
             st.dataframe(pd.DataFrame(preview), hide_index=True, width="stretch")
-        if st.button("✅ Cập nhật bảng theo dõi", type="primary", disabled=not preview, key="btn_tracking_import"):
+        saved_totals = db.get_settings().get(MONTH_TOTALS_KEY)
+        new_totals = merge_month_totals(saved_totals, month_totals) if month_totals else saved_totals
+        if month_totals:
+            st.caption("Tổng giờ theo tháng (ô 'Tổng số giờ đã triển khai'): " + " · ".join(
+                f"{month_label(m)}: ETA {t['eta']:g}h, Actual {t['actual']:g}h" for m, t in month_totals.items()))
+        if st.button("✅ Cập nhật bảng theo dõi", type="primary", disabled=not preview and new_totals == saved_totals,
+                     key="btn_tracking_import"):
+            if new_totals != saved_totals:
+                db.save_settings({MONTH_TOTALS_KEY: new_totals})
             if db.save_ticket_tracking_changes(added, updated, []):
                 st.session_state["_tracking_msg"] = f"Đã cập nhật từ file: thêm {len(added)}, sửa {len(updated)}"
                 st.session_state["_tracking_editor_version"] = st.session_state.get("_tracking_editor_version", 0) + 1
                 st.rerun()
 
+def _cell(value):
+    """Giá trị ô bảng → None nếu trống (None / NaN / NaT / chuỗi rỗng)."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        return None if pd.isna(value) else value
+    except (TypeError, ValueError):
+        return value
+
+def tracking_sort_key(item):
+    """Mục đang mở trước, Đóng/Hủy xuống cuối; trong mỗi nhóm ID AEGONA lớn ở trên (#40, #37, #35...).
+    Mục chưa có ID (việc mới, chưa lên ticket AEGONA) đứng đầu nhóm."""
+    ext = str(item.get("ext_id") or "").strip().lstrip("#")
+    num = int(ext) if ext.isdigit() else float("inf")
+    return (item.get("status") in TRACKING_CLOSED, -num, -(item.get("id") or 0))
+
+def month_label(work_month):
+    """'2026-10' → 'T10/2026'."""
+    try:
+        year, month = str(work_month).split("-")
+        return f"T{int(month)}/{year}"
+    except ValueError:
+        return str(work_month or "")
+
+def hours_to_md(hours):
+    return round(float(hours or 0) / HOURS_PER_MD, 2)
+
+def saved_month_totals():
+    """Tổng giờ từng tháng đúng như ô 'Tổng số giờ đã triển khai' của file báo cáo AEGONA (lưu khi đồng bộ file)."""
+    try:
+        return json.loads(db.get_settings().get(MONTH_TOTALS_KEY) or "{}")
+    except ValueError:
+        return {}
+
+def tracking_month_summary(items):
+    """Giờ/MD theo tháng tính giờ (work_month) so với hạn mức hợp đồng AEGONA. Tháng nào có tổng lấy từ file
+    thì dùng đúng số của file (công thức trong file có thể chừa dòng chuyển từ tháng trước), không thì tự cộng."""
+    months = {}
+    for i in items:
+        m = i.get("work_month")
+        if not m:
+            continue
+        s = months.setdefault(m, {"count": 0, "eta": 0.0, "actual": 0.0})
+        s["count"] += 1
+        s["eta"] += float(i.get("eta_hours") or 0)
+        s["actual"] += float(i.get("actual_hours") or 0)
+    for m, t in saved_month_totals().items():
+        s = months.setdefault(m, {"count": 0, "eta": 0.0, "actual": 0.0})
+        s["eta"], s["actual"] = float(t.get("eta") or 0), float(t.get("actual") or 0)
+    return dict(sorted(months.items()))
+
+def render_tracking_kpis(items):
+    summary = tracking_month_summary(items)
+    total_hours = sum(s["actual"] for s in summary.values())
+    this_month = now_vn().strftime("%Y-%m")
+    month_hours = summary.get(this_month, {}).get("actual", 0.0)
+    open_items = [i for i in items if i.get("status") not in TRACKING_CLOSED]
+    waiting = [i for i in open_items if i.get("status") in ("Đang testing", "Chờ deploy", "Chờ cập nhật")]
+    quota_md = hours_to_md(AGN_MONTHLY_QUOTA_HOURS)
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Tổng MD đã dùng", f"{hours_to_md(total_hours):g} MD", help=f"{total_hours:g} giờ thực tế · 1 MD = {HOURS_PER_MD} giờ",
+              border=True)
+    k2.metric(f"MD {month_label(this_month)}", f"{hours_to_md(month_hours):g} / {quota_md:g} MD",
+              help=f"{month_hours:g} / {AGN_MONTHLY_QUOTA_HOURS} giờ hạn mức tháng", border=True)
+    k3.metric("Ticket đang mở", len(open_items), border=True)
+    k4.metric("Đang testing / chờ deploy", len(waiting), border=True)
+
+def render_tracking_month_table(items):
+    """Bảng tổng theo tháng: số ticket, giờ ETA/thực tế, MD, hạn mức, vượt hạn mức + dòng tổng."""
+    summary = tracking_month_summary(items)
+    if not summary:
+        st.info("Chưa có dữ liệu giờ theo tháng — tải file báo cáo AEGONA ở mục 📥 bên dưới.")
+        return
+    rows = []
+    for m, s in summary.items():
+        rows.append({
+            "Tháng": month_label(m), "Số ticket": s["count"], "ETA (giờ)": s["eta"], "Thực tế (giờ)": s["actual"],
+            "MD": hours_to_md(s["actual"]), "Hạn mức (giờ)": AGN_MONTHLY_QUOTA_HOURS,
+            "Vượt hạn mức (giờ)": max(s["actual"] - AGN_MONTHLY_QUOTA_HOURS, 0),
+            "% hạn mức": round(s["actual"] / AGN_MONTHLY_QUOTA_HOURS * 100),
+        })
+    total_actual = sum(s["actual"] for s in summary.values())
+    rows.append({
+        "Tháng": "TỔNG", "Số ticket": sum(s["count"] for s in summary.values()),
+        "ETA (giờ)": sum(s["eta"] for s in summary.values()), "Thực tế (giờ)": total_actual,
+        "MD": hours_to_md(total_actual), "Hạn mức (giờ)": AGN_MONTHLY_QUOTA_HOURS * len(summary),
+        "Vượt hạn mức (giờ)": sum(r["Vượt hạn mức (giờ)"] for r in rows),
+        "% hạn mức": round(total_actual / (AGN_MONTHLY_QUOTA_HOURS * len(summary)) * 100),
+    })
+    st.dataframe(
+        pd.DataFrame(rows), hide_index=True, width="stretch",
+        column_config={
+            "ETA (giờ)": st.column_config.NumberColumn(format="%.2f"),
+            "Thực tế (giờ)": st.column_config.NumberColumn(format="%.2f"),
+            "MD": st.column_config.NumberColumn("MD (8 giờ)", format="%.2f"),
+            "Vượt hạn mức (giờ)": st.column_config.NumberColumn(format="%.2f"),
+            "% hạn mức": st.column_config.ProgressColumn("% hạn mức", format="%d%%", min_value=0, max_value=100),
+        },
+    )
+
+def render_tracking_md_pivot(shown):
+    """Mỗi ticket 1 dòng, mỗi tháng 1 cột MD (giờ thực tế / 8) + cột Tổng MD + dòng TỔNG cuối bảng."""
+    months = sorted({i["work_month"] for i in shown if i.get("work_month")})
+    if not months:
+        st.info("Các ticket đang lọc chưa có giờ theo tháng.")
+        return
+    rows = []
+    for i in shown:
+        # Không làm tròn từng ticket (0.25h = 0.03125 MD) để dòng TỔNG khớp tổng giờ / 8; bảng tự hiện 2 số lẻ
+        md = float(i["actual_hours"]) / HOURS_PER_MD if i.get("actual_hours") is not None else None
+        rows.append({
+            "ID": i.get("ext_id") or "", "Tiêu đề": (i.get("title") or "").splitlines()[0],
+            "Trạng thái": i.get("status") or "", "TT AEGONA": i.get("agn_status") or "",
+            "Hệ thống": i.get("system_name") or "",
+            "ETA (giờ)": float(i["eta_hours"]) if i.get("eta_hours") is not None else None,
+            "Thực tế (giờ)": float(i["actual_hours"]) if i.get("actual_hours") is not None else None,
+            **{month_label(m): (md if i.get("work_month") == m else None) for m in months},
+            "Tổng MD": md,
+        })
+    df = pd.DataFrame(rows)
+    total = {"ID": "", "Tiêu đề": "TỔNG", "Trạng thái": "", "TT AEGONA": "", "Hệ thống": ""}
+    for col in ["ETA (giờ)", "Thực tế (giờ)", *[month_label(m) for m in months], "Tổng MD"]:
+        total[col] = df[col].sum() if df[col].notna().any() else None
+    df = pd.concat([df, pd.DataFrame([total])], ignore_index=True)
+    number_cols = {col: st.column_config.NumberColumn(col, format="%.2f", width="small")
+                   for col in ["ETA (giờ)", "Thực tế (giờ)", *[month_label(m) for m in months], "Tổng MD"]}
+    st.dataframe(
+        df, hide_index=True, width="stretch", height=min(38 + 35 * len(df), 640),
+        column_config={
+            "ID": st.column_config.TextColumn("ID", width="small"),
+            "Tiêu đề": st.column_config.TextColumn("Tiêu đề", width="large"),
+            **number_cols,
+        },
+    )
+
 def render_ticket_tracking_editor(items, logs, start_date, end_date):
-    """Bảng theo dõi ticket bên ngoài (AEGONA...): sửa trạng thái/ưu tiên/ngày lên Production ngay trong bảng.
+    """Theo dõi ticket bên ngoài (AEGONA...): số liệu MD theo tháng, bộ lọc, bảng cập nhật trạng thái bằng dropdown.
     Đổi trạng thái được ghi log → báo cáo tuần ghi 'trạng thái cũ → mới' kèm ngày."""
     msg = st.session_state.pop("_tracking_msg", None)
     if msg:
         st.toast(msg)
-    show_closed = st.toggle("Hiện cả mục đã Đóng/Hủy", value=False, key="tracking_show_closed")
-    status_rank = {s: i for i, s in enumerate(TRACKING_STATUSES)}
-    shown = [i for i in items if show_closed or i.get("status") not in TRACKING_CLOSED]
-    shown.sort(key=lambda i: (status_rank.get(i.get("status"), 99), i["id"]))
-    label_to_key = {label: key for key, label in WORK_NOTE_LABELS.items()}
-    # Cột văn bản tự do: tên cột trên bảng → trường trong ticket_tracking
-    text_cols = {"Ghi chú": "note", "Nội dung cập nhật": "content", "Source code": "source_code", "Người thực hiện": "assignee"}
-    columns = ["id", "Trạng thái", "Ưu tiên", "Ngày lên Production", "ID", "Tiêu đề", "Nhóm", "Ghi chú",
-               "Nội dung cập nhật", "Source code", "Người thực hiện", "Đổi TT lúc"]
-    original = pd.DataFrame(
-        [
-            {"id": i["id"], "Trạng thái": i.get("status"), "Ưu tiên": i.get("priority") or None,
-             "Ngày lên Production": to_date(i.get("prod_date")), "ID": i.get("ext_id") or "",
-             "Tiêu đề": i.get("title") or "", "Nhóm": WORK_NOTE_LABELS.get(i.get("category"), i.get("category")),
-             **{col: i.get(field) or "" for col, field in text_cols.items()},
-             "Đổi TT lúc": to_date(i.get("status_changed_at")).strftime("%d/%m/%Y") if to_date(i.get("status_changed_at")) else ""}
-            for i in shown
-        ],
-        columns=columns,
+    render_tracking_kpis(items)
+
+    # --- Bộ lọc (dùng chung cho bảng cập nhật và bảng MD theo tháng) ---
+    all_months = sorted({i["work_month"] for i in items if i.get("work_month")}, reverse=True)
+    systems = sorted({i["system_name"] for i in items if i.get("system_name")})
+    with st.container(border=True):
+        f1, f2, f3, f4, f5 = st.columns([2.2, 2, 1.4, 1.4, 1.3], vertical_alignment="bottom")
+        search = f1.text_input("🔎 Tìm ID / tiêu đề / module", key="trk_search", placeholder="VD: 37, UrBox, An Gia...")
+        statuses = f2.multiselect("Trạng thái", TRACKING_STATUSES, key="trk_status", placeholder="Tất cả")
+        months = f3.multiselect("Tháng tính giờ", all_months, format_func=month_label, key="trk_month", placeholder="Tất cả")
+        sys_filter = f4.multiselect("Hệ thống", systems, key="trk_system", placeholder="Tất cả")
+        show_closed = f5.toggle("Hiện Đóng/Hủy", value=False, key="tracking_show_closed",
+                                help="Bật để xem cả mục đã Đóng/Hủy (xếp cuối bảng)")
+
+    def match(i, include_closed=False):
+        if statuses:
+            if i.get("status") not in statuses:
+                return False
+        elif not (show_closed or include_closed) and i.get("status") in TRACKING_CLOSED:
+            return False
+        if months and i.get("work_month") not in months:
+            return False
+        if sys_filter and i.get("system_name") not in sys_filter:
+            return False
+        if search.strip():
+            q = search.strip().lower().lstrip("#")
+            hay = " ".join(str(i.get(f) or "") for f in ("ext_id", "title", "module", "note", "assignee")).lower()
+            return q in hay
+        return True
+
+    shown = sorted((i for i in items if match(i)), key=tracking_sort_key)
+    # Bảng MD luôn tính cả mục Đóng/Hủy (phần lớn giờ nằm ở ticket đã đóng), vẫn theo các bộ lọc khác
+    shown_md = sorted((i for i in items if match(i, include_closed=True)), key=tracking_sort_key)
+    st.caption(f"Đang hiện **{len(shown)}**/{len(items)} mục · mở trước, Đóng/Hủy cuối · ID AEGONA lớn ở trên.")
+
+    tab_edit, tab_md, tab_month, tab_log = st.tabs(
+        ["✏️ Cập nhật trạng thái", "📊 MD theo ticket & tháng", "🗓️ Tổng theo tháng", "🕑 Đổi trạng thái trong tuần"]
     )
+    with tab_edit:
+        render_tracking_edit_table(shown, all_months)
+    with tab_md:
+        render_tracking_md_pivot(shown_md)
+        st.caption("Bảng này luôn tính cả mục Đóng/Hủy. Ô trống = ticket không tính giờ vào tháng đó.")
+    with tab_month:
+        render_tracking_month_table(items)
+        st.caption(f"Hạn mức hợp đồng AEGONA: {AGN_MONTHLY_QUOTA_HOURS} giờ/tháng · MD = giờ thực tế / {HOURS_PER_MD}.")
+    with tab_log:
+        # Các lần đổi trạng thái trong tuần đang xem — đúng nội dung sẽ vào báo cáo
+        items_by_id = {i["id"]: i for i in items}
+        week_logs = [l for l in logs if to_date(l.get("created_at")) and start_date <= to_date(l["created_at"]) <= end_date]
+        if not week_logs:
+            st.info("Không có lần đổi trạng thái nào trong tuần đang xem.")
+        for l in reversed(week_logs):
+            item = items_by_id.get(l["tracking_id"], {})
+            change = f"{l['old_status']} → {l['new_status']}" if l.get("old_status") else f"Thêm mới: {l['new_status']}"
+            title = str(item.get("title") or "").splitlines()[0] if item.get("title") else ""
+            st.markdown(
+                f"- **{to_date(l['created_at']).strftime('%d/%m')}** · {html.escape(str(item.get('ext_id') or ''))} "
+                f"{html.escape(title)} — {change}"
+            )
+
+# Cột trên bảng cập nhật → trường trong ticket_tracking
+TRACKING_EDIT_COLUMNS = {
+    "Trạng thái": "status", "ID": "ext_id", "Tiêu đề": "title", "Ưu tiên": "priority", "Tháng tính giờ": "work_month",
+    "ETA (giờ)": "eta_hours", "Thực tế (giờ)": "actual_hours", "Lên Production": "prod_date",
+    "Người thực hiện": "assignee", "Ghi chú": "note", "Hệ thống": "system_name", "Module": "module",
+    "Nhóm": "category", "Nội dung cập nhật": "content", "Source code": "source_code",
+}
+TRACKING_DETAIL_COLUMNS = ["Hệ thống", "Module", "Nhóm", "Nội dung cập nhật", "Source code"]
+
+def render_tracking_edit_table(shown, all_months):
+    """Bảng sửa trực tiếp (dropdown Trạng thái/Ưu tiên/Tháng...) → bấm Lưu. Không dùng cột khóa (disabled)
+    vì lưới hiển thị chữ cột khóa màu nhạt, khó đọc."""
+    label_to_key = {label: key for key, label in WORK_NOTE_LABELS.items()}
+    show_detail = st.toggle("Hiện cột chi tiết (Hệ thống, Module, Nhóm, Nội dung cập nhật, Source code)",
+                            value=False, key="trk_show_detail")
+    this_month = now_vn().date().replace(day=1)
+    month_options = sorted(set(all_months) | {
+        (this_month - datetime.timedelta(days=31 * k)).strftime("%Y-%m") for k in range(-1, 6)
+    }, reverse=True)
+
+    def to_row(i):
+        row = {"id": i["id"]}
+        for col, field in TRACKING_EDIT_COLUMNS.items():
+            value = i.get(field)
+            if field in ("eta_hours", "actual_hours"):
+                value = float(value) if value is not None else None
+            elif field == "prod_date":
+                value = to_date(value)
+            elif field == "category":
+                value = WORK_NOTE_LABELS.get(value, value)
+            elif field not in ("status", "priority", "work_month"):
+                value = value or ""
+            row[col] = value
+        return row
+
+    columns = ["id", *TRACKING_EDIT_COLUMNS]
+    original = pd.DataFrame([to_row(i) for i in shown], columns=columns)
+    order = ["Trạng thái", "ID", "Tiêu đề", "Ưu tiên", "Tháng tính giờ", "ETA (giờ)", "Thực tế (giờ)",
+             "Lên Production", "Người thực hiện", "Ghi chú"]
+    if show_detail:
+        order += TRACKING_DETAIL_COLUMNS
     version = st.session_state.get("_tracking_editor_version", 0)
     edited = st.data_editor(
         original,
-        key=f"tracking_editor_{show_closed}_{version}",
+        key=f"tracking_editor_{hash(tuple(original['id']))}_{show_detail}_{version}",
         num_rows="dynamic",
         hide_index=True,
         width="stretch",
-        row_height=60,
-        column_order=columns[1:],
-        disabled=["Đổi TT lúc"],
+        height=min(42 + 56 * (len(original) + 1), 720),
+        row_height=56,
+        column_order=order,
         column_config={
             "Trạng thái": st.column_config.SelectboxColumn("Trạng thái", options=TRACKING_STATUSES, default="Mới", required=True, width="small"),
-            "Ưu tiên": st.column_config.SelectboxColumn("Ưu tiên", options=TRACKING_PRIORITIES, width="small"),
-            "Ngày lên Production": st.column_config.DateColumn("Lên Production", format="DD/MM/YYYY", width="small"),
-            "ID": st.column_config.TextColumn("ID AEGONA", width="small"),
+            "ID": st.column_config.TextColumn("ID", width=60, help="ID AEGONA, VD: #40"),
             "Tiêu đề": st.column_config.TextColumn("Tiêu đề", width="large", required=True),
-            "Nhóm": st.column_config.SelectboxColumn("Nhóm", options=list(label_to_key), default=WORK_NOTE_LABELS["gree_app"], required=True, width="small"),
+            "Ưu tiên": st.column_config.SelectboxColumn("Ưu tiên", options=TRACKING_PRIORITIES, width="small"),
+            "Tháng tính giờ": st.column_config.SelectboxColumn("Tháng", options=month_options, width="small",
+                                                               help="Tháng AEGONA tính giờ (dạng YYYY-MM)"),
+            "ETA (giờ)": st.column_config.NumberColumn("ETA (h)", min_value=0, step=0.25, format="%.2f", width="small"),
+            "Thực tế (giờ)": st.column_config.NumberColumn("Thực tế (h)", min_value=0, step=0.25, format="%.2f", width="small",
+                                                          help=f"Giờ thực tế; MD = giờ / {HOURS_PER_MD}"),
+            "Lên Production": st.column_config.DateColumn("Lên Prod", format="DD/MM/YYYY", width="small"),
+            "Người thực hiện": st.column_config.TextColumn("Người TH", width="small"),
             "Ghi chú": st.column_config.TextColumn("Ghi chú", width="medium"),
+            "Hệ thống": st.column_config.TextColumn("Hệ thống", width="small"),
+            "Module": st.column_config.TextColumn("Module", width="medium"),
+            "Nhóm": st.column_config.SelectboxColumn("Nhóm", options=list(label_to_key), default=WORK_NOTE_LABELS["gree_app"], required=True, width="small"),
             "Nội dung cập nhật": st.column_config.TextColumn("Nội dung cập nhật", width="large"),
             "Source code": st.column_config.TextColumn("Source code", width="small"),
-            "Người thực hiện": st.column_config.TextColumn("Người thực hiện", width="small"),
-            "Đổi TT lúc": st.column_config.TextColumn("Đổi TT lúc", width="small"),
         },
     )
-    if st.button("💾 Lưu bảng theo dõi ticket", key="btn_save_tracking"):
-        original_by_id = {int(r["id"]): r for r in original.to_dict("records")}
-        kept_ids, added, updated = set(), [], []
-        for row in edited.to_dict("records"):
-            title = str(row.get("Tiêu đề") or "").strip()
-            if not title:
-                continue
-            priority = row.get("Ưu tiên")
-            item = {
-                "ext_id": str(row.get("ID") or "").strip() or None,
-                "title": title,
-                "status": row.get("Trạng thái") or "Mới",
-                "priority": priority if isinstance(priority, str) and priority else None,
-                "category": label_to_key.get(row.get("Nhóm"), "gree_app"),
-                "prod_date": to_date(row.get("Ngày lên Production")) if not pd.isna(row.get("Ngày lên Production")) else None,
-                **{field: str(row.get(col) or "").strip() or None for col, field in text_cols.items()},
-            }
-            if pd.isna(row.get("id")):
-                added.append(item)
-                continue
-            item["id"] = int(row["id"])
-            kept_ids.add(item["id"])
-            old = original_by_id[item["id"]]
-            if any(old[c] != row.get(c) for c in columns[1:-1]):
-                updated.append(item)
-        deleted_ids = [i for i in original_by_id if i not in kept_ids]
-        if db.save_ticket_tracking_changes(added, updated, deleted_ids):
-            st.session_state["_tracking_msg"] = (
-                f"Đã lưu: thêm {len(added)}, sửa {len(updated)}, xóa {len(deleted_ids)}"
-            )
-            st.session_state["_tracking_editor_version"] = version + 1
-            st.rerun()
-
-    # Các lần đổi trạng thái trong tuần đang xem — đúng nội dung sẽ vào báo cáo
-    items_by_id = {i["id"]: i for i in items}
-    week_logs = [l for l in logs if to_date(l.get("created_at")) and start_date <= to_date(l["created_at"]) <= end_date]
-    if week_logs:
-        with st.expander(f"🕑 Đổi trạng thái trong tuần ({len(week_logs)})"):
-            for l in reversed(week_logs):
-                item = items_by_id.get(l["tracking_id"], {})
-                change = f"{l['old_status']} → {l['new_status']}" if l.get("old_status") else f"Thêm mới: {l['new_status']}"
-                st.markdown(
-                    f"- **{to_date(l['created_at']).strftime('%d/%m')}** · {html.escape(str(item.get('ext_id') or ''))} "
-                    f"{html.escape(str(item.get('title') or '').splitlines()[0] if item.get('title') else '')} — {change}"
-                )
+    if not st.button("💾 Lưu bảng theo dõi ticket", type="primary", key="btn_save_tracking"):
+        return
+    original_by_id = {int(r["id"]): r for r in original.to_dict("records")}
+    kept_ids, added, updated = set(), [], []
+    for row in edited.to_dict("records"):
+        title = str(_cell(row.get("Tiêu đề")) or "").strip()
+        if not title:
+            continue
+        item = {}
+        for col, field in TRACKING_EDIT_COLUMNS.items():
+            value = _cell(row.get(col))
+            if field == "ext_id":
+                value = normalize_ext_id(value)
+            elif field == "category":
+                value = label_to_key.get(value, "gree_app")
+            elif field == "prod_date":
+                value = to_date(value) if value is not None else None
+            elif field in ("eta_hours", "actual_hours"):
+                value = float(value) if value is not None else None
+            elif isinstance(value, str):
+                value = value.strip() or None
+            item[field] = value
+        item["title"] = title
+        item["status"] = item["status"] or "Mới"
+        if _cell(row.get("id")) is None:
+            added.append(item)
+            continue
+        item_id = int(row["id"])
+        kept_ids.add(item_id)
+        old = original_by_id[item_id]
+        changes = {field: item[field] for col, field in TRACKING_EDIT_COLUMNS.items()
+                   if not same_value(_cell(old.get(col)), _cell(row.get(col)))}
+        if changes:
+            # Gửi đủ các trường đã đổi (đã chuẩn hóa); db chỉ UPDATE các trường có trong dict
+            updated.append(dict(changes, id=item_id))
+    deleted_ids = [i for i in original_by_id if i not in kept_ids]
+    if db.save_ticket_tracking_changes(added, updated, deleted_ids):
+        st.session_state["_tracking_msg"] = f"Đã lưu: thêm {len(added)}, sửa {len(updated)}, xóa {len(deleted_ids)}"
+        st.session_state["_tracking_editor_version"] = st.session_state.get("_tracking_editor_version", 0) + 1
+        st.rerun()
 
 def render_ai_notes_paste_box():
     """Dán JSON do AI tổng hợp (ChatGPT/Claude trên web...) → đưa vào hàng chờ duyệt."""
@@ -1909,11 +2306,16 @@ def render_note_drafts_review(start_date, end_date):
         columns=["id", "Chọn", "Ngày", "Nhóm", "Nội dung", "Nguồn"],
     )
     version = st.session_state.get("_drafts_editor_version", 0)
+    # row_height > 64px thì Streamlit tự xuống dòng trong ô → đọc hết nội dung dài khi review.
+    # Ước ~70 ký tự/dòng, ~21px/dòng; giới hạn 8 dòng (dài hơn thì bấm đúp vào ô để xem/sửa).
+    max_lines = max((len(str(d["content"] or "")) // 70 + 1 + str(d["content"] or "").count("\n") for d in week_drafts), default=1)
+    row_height = max(70, min(max_lines, 8) * 21 + 14)
     edited = st.data_editor(
         original,
         key=f"drafts_editor_{start_date}_{version}",
         hide_index=True,
         width="stretch",
+        row_height=row_height,
         column_order=["Chọn", "Ngày", "Nhóm", "Nội dung", "Nguồn"],
         disabled=["Nguồn"],
         column_config={
@@ -1949,21 +2351,6 @@ def render_note_drafts_review(start_date, end_date):
 # -----------------
 # THANH ĐIỀU HƯỚNG (SIDEBAR)
 # -----------------
-# -----------------
-# TỰ ĐỘNG GỬI BÁO CÁO TUẦN
-# -----------------
-# Streamlit Cloud cho app ngủ khi không ai truy cập nên không thể chạy scheduler nền.
-# Thay vào đó kiểm tra mỗi lần có người mở app: quá giờ hẹn và tuần này chưa gửi thì gửi.
-app_settings = db.get_settings()
-if weekly_email_due(app_settings):
-    # Ghi mốc thử TRƯỚC khi gửi để nếu thất bại thì cooldown có hiệu lực ngay,
-    # tránh mọi lượt truy cập sau đó đều phải chờ timeout SMTP.
-    db.save_settings({"report_email_last_attempt_at": now_vn().isoformat()})
-    ok, msg = send_weekly_report_email(app_settings, db_tickets, db_tasks)
-    if ok:
-        st.toast(f"📧 {msg}")
-    else:
-        print(f"[Gửi báo cáo tuần tự động] Thất bại: {msg}")
 
 # Khởi tạo trạng thái sitemap page mặc định
 if "selected_page" not in st.session_state:
@@ -1989,7 +2376,8 @@ with st.sidebar:
         "📱 Gree App Support",
         "📈 Báo cáo tuần của Nam",
     ]
-    menu = base_menu + ["⚙️ Cài đặt"] if is_admin() else base_menu
+    # Báo cáo Ticket (cho Sếp) và Cài đặt chỉ hiện khi đã đăng nhập Admin
+    menu = base_menu + ["📊 Báo cáo Ticket", "⚙️ Cài đặt"] if is_admin() else base_menu
 
     # Nếu guest đang ở trang bị ẩn → reset về trang chủ
     if st.session_state.get("selected_page") not in menu:
@@ -2559,6 +2947,549 @@ def render_ticket_domain_page(state_key, main_title, subtitle, domain_forms, sho
 # GIAO DIỆN CHÍNH
 # -----------------
 
+# -----------------
+# BÁO CÁO TICKET (trang cho Sếp xem — chỉ hiện khi đã đăng nhập Admin)
+# -----------------
+# Gói bảo trì AEGONA: AGN_PACKAGE_HOURS giờ / AGN_CONTRACT_MONTHS tháng từ AGN_CONTRACT_SIGNED (khai báo ở đầu file).
+
+# Màu đậm hơn STATUS_COLORS để chữ trắng trên thẻ dễ đọc (sáng lẫn tối)
+RPT_COLORS = {
+    "navy": "#1E3A8A", "blue": "#2563EB", "purple": "#7C3AED", "amber": "#D97706",
+    "red": "#DC2626", "green": "#059669", "gray": "#475569", "teal": "#0F766E",
+}
+RPT_STATUS_COLORS = {
+    "Mới tạo": "#2563EB", "Đã tiếp nhận": "#7C3AED", "Đang xử lý": "#D97706",
+    "Chờ xử lý": "#DC2626", "Hoàn thành": "#059669", "Từ chối": "#64748B",
+}
+
+REPORT_CSS = """
+<style>
+.rpt-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:12px;margin:4px 0 16px}
+.rpt-card{border-radius:14px;padding:14px 16px;color:#fff;box-shadow:0 2px 10px rgba(15,23,42,.15);position:relative;overflow:hidden}
+.rpt-card:after{content:"";position:absolute;right:-28px;top:-28px;width:90px;height:90px;border-radius:50%;background:rgba(255,255,255,.12)}
+.rpt-card .lbl{font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;opacity:.95}
+.rpt-card .val{font-size:2.05rem;font-weight:800;line-height:1.15;margin-top:6px}
+.rpt-card .sub{font-size:.8rem;opacity:.92;margin-top:2px}
+.rpt-chips{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}
+.rpt-chip{display:inline-flex;align-items:center;gap:8px;padding:5px 12px;border-radius:999px;font-weight:600;font-size:.88rem;
+  border:1.5px solid var(--c);color:var(--c);background:color-mix(in srgb,var(--c) 10%,transparent)}
+.rpt-chip b{background:var(--c);color:#fff;border-radius:999px;padding:0 9px;font-size:.85rem}
+.rpt-meter{margin:6px 0 4px}
+.rpt-meter .row{display:flex;justify-content:space-between;font-size:.85rem;font-weight:600;margin-bottom:4px}
+.rpt-meter .track{height:16px;border-radius:8px;background:rgba(148,163,184,.28);overflow:hidden;position:relative}
+.rpt-meter .fill{height:100%;border-radius:8px}
+.rpt-section{font-size:1.25rem;font-weight:800;margin:18px 0 8px;padding-left:10px;border-left:5px solid #2563EB}
+</style>
+"""
+
+def rpt_cards_html(cards):
+    """cards: list (nhãn, giá trị, dòng phụ, mã màu) → lưới thẻ số liệu màu."""
+    items = "".join(
+        f'<div class="rpt-card" style="background:linear-gradient(135deg,{color},{color}D9)">'
+        f'<div class="lbl">{html.escape(str(label))}</div><div class="val">{html.escape(str(value))}</div>'
+        f'<div class="sub">{html.escape(str(sub or ""))}</div></div>'
+        for label, value, sub, color in cards
+    )
+    return f'<div class="rpt-grid">{items}</div>'
+
+def rpt_meter_html(label, percent, color, right_text):
+    width = max(0, min(percent, 100))
+    return (f'<div class="rpt-meter"><div class="row"><span>{html.escape(label)}</span><span>{html.escape(right_text)}</span></div>'
+            f'<div class="track"><div class="fill" style="width:{width:.1f}%;background:{color}"></div></div></div>')
+
+def rpt_section(title):
+    st.markdown(f'<div class="rpt-section">{html.escape(title)}</div>', unsafe_allow_html=True)
+
+def ticket_domain(ticket):
+    cfg = FORM_TYPE_TO_CONFIG.get(normalize_form_type(ticket.get("form_type")), {})
+    return cfg.get("domain", "warranty")
+
+def ticket_form_short_label(ticket):
+    f_type = normalize_form_type(ticket.get("form_type"))
+    label = FORM_TYPE_TO_CONFIG.get(f_type, {}).get("label", f_type or "—")
+    return re.sub(r"^(Form \d+|ERP-\d+|GreeApp-\d+):\s*", "", label)
+
+def report_period_range(preset, today):
+    """Khoảng ngày (from, to) theo lựa chọn nhanh; None = không giới hạn."""
+    if preset == "Tháng này":
+        return today.replace(day=1), today
+    if preset == "Tháng trước":
+        last = today.replace(day=1) - datetime.timedelta(days=1)
+        return last.replace(day=1), last
+    if preset == "Quý này":
+        q_month = (today.month - 1) // 3 * 3 + 1
+        return today.replace(month=q_month, day=1), today
+    if preset == "Năm nay":
+        return today.replace(month=1, day=1), today
+    return None
+
+def style_status_cells(value):
+    status = re.sub(r"^\W+\s*", "", str(value))
+    color = RPT_STATUS_COLORS.get(status)
+    return f"background-color:{color};color:#fff;font-weight:600" if color else ""
+
+def style_aging_cells(value):
+    try:
+        days = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if days >= 7:
+        return "background-color:#FEE2E2;color:#B91C1C;font-weight:700"
+    if days >= AGING_WARN_DAYS:
+        return "background-color:#FEF3C7;color:#B45309;font-weight:700"
+    return "color:#047857;font-weight:600"
+
+def report_ticket_df(tickets):
+    rows = []
+    for t in tickets:
+        d = days_open(t)
+        rows.append({
+            "Mã Ticket": t["id"],
+            "Tiêu đề": t.get("subject") or "—",
+            "Lĩnh vực": WORK_NOTE_LABELS.get(ticket_domain(t), "—"),
+            "Loại yêu cầu": ticket_form_short_label(t),
+            "Người y/c": t.get("requester") or "—",
+            "Ngày tạo": format_ticket_date(t.get("created_at")),
+            "Ngày đóng": format_ticket_date(t.get("closed_at")) if t.get("closed_at") else "",
+            "Số ngày": d if d is not None else None,
+            "Trạng thái": t.get("status") or "",
+        })
+    return pd.DataFrame(rows)
+
+def render_styled_ticket_table(tickets, key, aging=True):
+    """Bảng ticket tô màu theo trạng thái (+ số ngày mở). Bấm 1 dòng để mở ticket ở trang xử lý."""
+    df = report_ticket_df(tickets)
+    styler = df.style.map(style_status_cells, subset=["Trạng thái"])
+    if aging:
+        styler = styler.map(style_aging_cells, subset=["Số ngày"])
+    event = st.dataframe(
+        styler, key=key, on_select="rerun", selection_mode="single-row", hide_index=True, width="stretch",
+        height=min(38 + 35 * len(df), 520),
+        column_config={
+            "Tiêu đề": st.column_config.TextColumn(width="large"),
+            "Số ngày": st.column_config.NumberColumn("Số ngày", help="Số ngày từ lúc tạo tới lúc đóng (hoặc tới hôm nay nếu chưa đóng)"),
+        },
+    )
+    if event.selection.rows:
+        goto_ticket_detail(tickets[event.selection.rows[0]])
+        st.rerun()
+    return df
+
+def month_range(start_month, count):
+    """'2026-07', 3 → ['2026-07', '2026-08', '2026-09']."""
+    year, month = map(int, start_month.split("-"))
+    months = []
+    for _ in range(count):
+        months.append(f"{year:04d}-{month:02d}")
+        month += 1
+        if month > 12:
+            year, month = year + 1, 1
+    return months
+
+def render_ticket_report_tickets(tickets):
+    today = now_vn().date()
+    f1, f2, f3 = st.columns([1.2, 1.6, 1.6])
+    preset = f1.selectbox("Khoảng thời gian (ngày tạo)", ["Tất cả", "Tháng này", "Tháng trước", "Quý này", "Năm nay", "Tùy chọn"],
+                          key="rpt_period")
+    if preset == "Tùy chọn":
+        picked = f1.date_input("Từ ngày – đến ngày", (today.replace(day=1), today), format="DD/MM/YYYY", key="rpt_range")
+        period = picked if isinstance(picked, (tuple, list)) and len(picked) == 2 else None
+    else:
+        period = report_period_range(preset, today)
+    domains = f2.multiselect("Lĩnh vực", list(WORK_NOTE_LABELS)[:3], format_func=WORK_NOTE_LABELS.get,
+                             key="rpt_domains", placeholder="Tất cả lĩnh vực")
+    statuses = f3.multiselect("Trạng thái", STATUS_LIST, key="rpt_statuses", placeholder="Tất cả trạng thái")
+
+    scope = [t for t in tickets if not domains or ticket_domain(t) in domains]
+    in_period = [t for t in scope if not period or (to_date(t.get("created_at")) and period[0] <= to_date(t["created_at"]) <= period[1])]
+    if statuses:
+        in_period = [t for t in in_period if t.get("status") in statuses]
+    # Việc chưa xong luôn tính tới hôm nay (không phụ thuộc ngày tạo) — tồn đọng thì phải hiện
+    open_now = sort_tickets_for_display([t for t in scope if t.get("status") not in CLOSED_STATUSES
+                                         and (not statuses or t.get("status") in statuses)])
+    overdue = [t for t in open_now if (days_open(t) or 0) >= AGING_WARN_DAYS]
+    done = [t for t in in_period if t.get("status") == "Hoàn thành"]
+    rejected = [t for t in in_period if t.get("status") == "Từ chối"]
+    durations = [days_open(t) for t in done if t.get("closed_at") and days_open(t) is not None]
+    avg_days = sum(durations) / len(durations) if durations else None
+    rate = len(done) / len(in_period) * 100 if in_period else 0
+
+    period_text = "toàn bộ thời gian" if not period else f"{period[0]:%d/%m/%Y} – {period[1]:%d/%m/%Y}"
+    st.caption(f"Số liệu theo ngày tạo ticket: **{period_text}**. Ô *Chưa hoàn thành* / *Quá {AGING_WARN_DAYS} ngày* tính tất cả ticket còn mở tới hôm nay.")
+    st.markdown(rpt_cards_html([
+        ("Tổng ticket", len(in_period), period_text, RPT_COLORS["navy"]),
+        ("Chưa hoàn thành", len(open_now), "đang mở tới hôm nay", RPT_COLORS["amber"]),
+        (f"Quá {AGING_WARN_DAYS} ngày", len(overdue), "cần ưu tiên xử lý", RPT_COLORS["red"]),
+        ("Hoàn thành", len(done), f"tỷ lệ {rate:.0f}%", RPT_COLORS["green"]),
+        ("Từ chối", len(rejected), "không thực hiện", RPT_COLORS["gray"]),
+        ("TG xử lý TB", f"{avg_days:.1f} ngày" if avg_days is not None else "—", "từ lúc tạo tới lúc đóng", RPT_COLORS["purple"]),
+    ]), unsafe_allow_html=True)
+
+    counts = {s: len([t for t in in_period if t.get("status") == s]) for s in STATUS_LIST}
+    chips = "".join(f'<span class="rpt-chip" style="--c:{RPT_STATUS_COLORS[s]}">{STATUS_ICONS.get(s, "")} {s} <b>{n}</b></span>'
+                    for s, n in counts.items())
+    st.markdown(f'<div class="rpt-chips">{chips}</div>', unsafe_allow_html=True)
+
+    rpt_section(f"⚠️ Việc chưa hoàn thành ({len(open_now)})")
+    if open_now:
+        st.caption(f"Ô *Số ngày*: xanh < {AGING_WARN_DAYS} ngày · vàng ≥ {AGING_WARN_DAYS} ngày · đỏ ≥ 7 ngày. Bấm vào một dòng để mở ticket.")
+        render_styled_ticket_table(open_now, "rpt_open_table")
+    else:
+        st.success("✅ Không còn ticket nào chưa hoàn thành.")
+
+    if in_period:
+        rpt_section("📈 Thống kê")
+        c1, c2 = st.columns([3, 2])
+        chart_df = pd.DataFrame([{
+            "Tháng": t["created_at"].strftime("%Y-%m"),
+            "Trạng thái": t.get("status"),
+            "Lĩnh vực": WORK_NOTE_LABELS.get(ticket_domain(t), "—"),
+        } for t in in_period if isinstance(t.get("created_at"), datetime.datetime)])
+        status_scale = alt.Scale(domain=STATUS_LIST, range=[RPT_STATUS_COLORS[s] for s in STATUS_LIST])
+        with c1:
+            st.markdown("**Số ticket theo tháng (theo trạng thái)**")
+            st.altair_chart(
+                alt.Chart(chart_df).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+                    x=alt.X("Tháng:O", title=None, axis=alt.Axis(labelAngle=0)),
+                    y=alt.Y("count():Q", title="Số ticket"),
+                    color=alt.Color("Trạng thái:N", scale=status_scale, legend=alt.Legend(orient="bottom", title=None)),
+                    tooltip=["Tháng", "Trạng thái", alt.Tooltip("count():Q", title="Số ticket")],
+                ).properties(height=300),
+                width="stretch",
+            )
+        with c2:
+            st.markdown("**Theo lĩnh vực**")
+            st.altair_chart(
+                alt.Chart(chart_df).mark_bar(cornerRadiusEnd=3).encode(
+                    y=alt.Y("Lĩnh vực:N", title=None, sort="-x"),
+                    x=alt.X("count():Q", title="Số ticket"),
+                    color=alt.Color("Trạng thái:N", scale=status_scale, legend=None),
+                    tooltip=["Lĩnh vực", "Trạng thái", alt.Tooltip("count():Q", title="Số ticket")],
+                ).properties(height=300),
+                width="stretch",
+            )
+
+    rpt_section(f"📋 Danh sách ticket trong kỳ ({len(in_period)})")
+    kw = st.text_input("Tìm theo mã / tiêu đề / người yêu cầu", key="rpt_kw", placeholder="Nhập từ khóa...")
+    shown = sort_tickets_for_display(in_period)
+    if kw.strip():
+        k = kw.strip().lower()
+        shown = [t for t in shown if k in str(t.get("id", "")).lower() or k in str(t.get("subject", "")).lower()
+                 or k in str(t.get("requester", "")).lower()]
+    if shown:
+        df = render_styled_ticket_table(shown, "rpt_all_table", aging=False)
+        st.download_button("⬇️ Tải danh sách (CSV/Excel)", df.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"BaoCaoTicket_{today:%Y%m%d}.csv", mime="text/csv")
+    else:
+        st.info("Không có ticket nào khớp bộ lọc.")
+
+# Nhóm trạng thái ticket AEGONA đang mở → 4 ô chi tiết (+ ô tổng "Ticket đang mở")
+AGN_OPEN_GROUPS = [
+    ("Mới (chưa thực hiện)", ("Mới",), "#2563EB"),
+    ("Chờ đề xuất", ("Chờ đề xuất",), "#7C3AED"),
+    ("Đang thực hiện", ("Đang thực hiện",), "#D97706"),
+    ("Testing / chờ deploy", ("Đang testing", "Chờ deploy", "Chờ cập nhật", "Đã lên Production"), "#0F766E"),
+]
+TRACKING_STATUS_COLORS = {
+    "Mới": "#2563EB", "Chờ đề xuất": "#7C3AED", "Đang thực hiện": "#D97706", "Đang testing": "#0891B2",
+    "Chờ deploy": "#0F766E", "Chờ cập nhật": "#0D9488", "Đã lên Production": "#059669", "Đóng": "#64748B", "Hủy": "#94A3B8",
+}
+
+# Giờ của ticket ở các trạng thái này = đã triển khai thật trên hệ thống; còn lại = đã làm nhưng chưa triển khai
+AGN_DEPLOYED_STATUSES = ("Đóng", "Đã lên Production")
+
+def agn_item_hours(item):
+    return float(item.get("actual_hours") or 0)
+
+def agn_package_stats(items):
+    """Số liệu gói bảo trì AEGONA (dùng chung cho trang Báo cáo Ticket và file PDF). None nếu chưa có giờ."""
+    summary = tracking_month_summary(items)
+    if not summary:
+        return None
+    signed = AGN_CONTRACT_SIGNED
+    contract_end = signed.replace(year=signed.year + 1) - datetime.timedelta(days=1)
+    total_days = (contract_end - signed).days + 1
+    today = now_vn().date()
+    elapsed_days = min(max((today - signed).days + 1, 0), total_days)
+    contract_months = month_range(signed.strftime("%Y-%m"), AGN_CONTRACT_MONTHS)
+    this_month = today.strftime("%Y-%m")
+    elapsed = len([m for m in contract_months if m <= this_month])  # số tháng tính giờ đã tới (kể cả tháng này)
+    quota = AGN_PACKAGE_HOURS
+    in_contract = {m: summary.get(m, {"count": 0, "eta": 0.0, "actual": 0.0}) for m in contract_months}
+    used = sum(s["actual"] for s in in_contract.values())
+    elapsed_months = elapsed_days / total_days * AGN_CONTRACT_MONTHS
+    remaining = quota - used
+    remaining_months = AGN_CONTRACT_MONTHS - max(elapsed - 1, 0)
+
+    # Tách giờ đã thực hiện: đã triển khai / chưa triển khai (theo trạng thái ticket). Phần chưa triển khai cộng từ
+    # từng ticket; phần đã triển khai = tổng tháng (theo file AEGONA) − chưa triển khai → 2 phần luôn cộng đúng tổng.
+    worked = sorted([i for i in items if i.get("work_month") in in_contract and agn_item_hours(i) > 0],
+                    key=lambda i: (i["work_month"], -tracking_sort_key(i)[1]))
+    deployed_items = [i for i in worked if i.get("status") in AGN_DEPLOYED_STATUSES]
+    pending_items = [i for i in worked if i.get("status") not in AGN_DEPLOYED_STATUSES]
+    month_pending = {m: sum(agn_item_hours(i) for i in pending_items if i["work_month"] == m) for m in contract_months}
+    pending = sum(month_pending.values())
+    pending_by_status = {}
+    for i in pending_items:
+        pending_by_status[i["status"]] = pending_by_status.get(i["status"], 0.0) + agn_item_hours(i)
+
+    month_rows, cumulative = [], 0.0
+    for m in contract_months:
+        s = in_contract[m]
+        has_data = m <= this_month or bool(s["actual"])
+        cumulative += s["actual"]
+        month_rows.append({
+            "month": m, "label": month_label(m), "has_data": has_data, "count": s["count"], "eta": s["eta"],
+            "actual": s["actual"], "pending": month_pending[m], "deployed": s["actual"] - month_pending[m],
+            "quota": AGN_MONTHLY_QUOTA_HOURS, "diff": s["actual"] - AGN_MONTHLY_QUOTA_HOURS,
+            "cum": cumulative, "cum_pct": cumulative / quota * 100,
+        })
+
+    open_items = sorted([i for i in items if i.get("status") not in TRACKING_CLOSED], key=tracking_sort_key)
+    open_groups = [(label, len([i for i in open_items if i.get("status") in statuses]), color, statuses)
+                   for label, statuses, color in AGN_OPEN_GROUPS]
+    return {
+        "signed": signed, "contract_end": contract_end, "total_days": total_days, "elapsed_days": elapsed_days,
+        "today": today, "this_month": this_month, "contract_months": contract_months, "elapsed": elapsed,
+        "quota": quota, "monthly_quota": AGN_MONTHLY_QUOTA_HOURS, "hours_per_md": HOURS_PER_MD,
+        "used": used, "used_pct": used / quota * 100 if quota else 0,
+        "time_pct": elapsed_days / total_days * 100, "remaining": remaining,
+        "month_used": in_contract[this_month]["actual"] if this_month in in_contract else 0.0,
+        "avg_month": used / elapsed_months if elapsed_months else 0,
+        "remaining_months": remaining_months,
+        "per_month_left": remaining / remaining_months if remaining_months > 0 else None,
+        "month_rows": month_rows,
+        "total_count": sum(s["count"] for s in in_contract.values()),
+        "total_eta": sum(s["eta"] for s in in_contract.values()),
+        "total_diff": used - AGN_MONTHLY_QUOTA_HOURS * elapsed,
+        "outside": {m: summary[m] for m in sorted(summary) if m not in in_contract},
+        "file_totals": saved_month_totals(),
+        "open_items": open_items, "open_groups": open_groups,
+        "closed_count": len([i for i in items if i.get("status") in TRACKING_CLOSED]),
+        "status_counts": {s: len([i for i in items if i.get("status") == s]) for s in TRACKING_STATUSES},
+        "deployed": used - pending, "pending": pending, "deployed_items": deployed_items, "pending_items": pending_items,
+        "pending_by_status": dict(sorted(pending_by_status.items(), key=lambda kv: -kv[1])),
+        "deployed_statuses": AGN_DEPLOYED_STATUSES,
+    }
+
+def tracking_status_style(v):
+    color = TRACKING_STATUS_COLORS.get(v)
+    return f"background-color:{color};color:#fff;font-weight:600" if color else ""
+
+def render_agn_hours_list(hours_items, empty_text):
+    """Danh sách ticket kèm giờ thực tế (+ dòng TỔNG), tô màu cột trạng thái."""
+    if not hours_items:
+        st.info(empty_text)
+        return
+    rows = [{
+        "ID": i.get("ext_id") or "—", "Tiêu đề": (i.get("title") or "").strip().splitlines()[0] if (i.get("title") or "").strip() else "",
+        "Trạng thái": i.get("status") or "", "TT AEGONA": i.get("agn_status") or "", "Hệ thống": i.get("system_name") or "",
+        "Tháng tính giờ": month_label(i["work_month"]),
+        "Kết thúc": f"{to_date(i.get('end_date')):%d/%m/%Y}" if to_date(i.get("end_date")) else "",
+        "Giờ thực tế": agn_item_hours(i), "MD": agn_item_hours(i) / HOURS_PER_MD,
+    } for i in hours_items]
+    total = sum(r["Giờ thực tế"] for r in rows)
+    rows.append({"ID": "", "Tiêu đề": f"TỔNG ({len(hours_items)} ticket)", "Trạng thái": "", "TT AEGONA": "", "Hệ thống": "",
+                 "Tháng tính giờ": "", "Kết thúc": "", "Giờ thực tế": total, "MD": total / HOURS_PER_MD})
+    df = pd.DataFrame(rows)
+    styler = (df.style.map(tracking_status_style, subset=["Trạng thái"])
+              .apply(lambda r: ["font-weight:800;background-color:#E0E7FF;color:#1E3A8A"] * len(r)
+                     if str(r["Tiêu đề"]).startswith("TỔNG (") else [""] * len(r), axis=1)
+              .format({"Giờ thực tế": "{:.2f}", "MD": "{:.2f}"}))
+    st.dataframe(styler, hide_index=True, width="stretch", height=min(38 + 35 * len(df), 520),
+                 column_config={"Tiêu đề": st.column_config.TextColumn(width="large")})
+
+def render_agn_hours_split(st_):
+    """Giờ đã thực hiện = đã triển khai trên hệ thống + chưa triển khai (chờ đề xuất, đang làm, testing...)."""
+    used, deployed, pending = st_["used"], st_["deployed"], st_["pending"]
+    dep_pct = deployed / used * 100 if used else 0
+    pend_pct = 100 - dep_pct if used else 0
+    rpt_section(f"🚀 Phân tách {used:.2f} giờ đã thực hiện")
+    pend_detail = " · ".join(f"{s} {h:.2f}" for s, h in st_["pending_by_status"].items())
+    st.markdown(rpt_cards_html([
+        ("⏳ Chưa triển khai", f"{pending:.2f} giờ",
+         f"{pend_pct:.1f}% · {len(st_['pending_items'])} ticket · {pend_detail or 'không có'}", RPT_COLORS["amber"]),
+        ("✅ Đã triển khai trên hệ thống", f"{deployed:.2f} giờ",
+         f"{dep_pct:.1f}% · {len(st_['deployed_items'])} ticket · trạng thái {' / '.join(st_['deployed_statuses'])}", RPT_COLORS["green"]),
+    ]), unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="rpt-meter"><div class="row"><span>✅ Đã triển khai {deployed:.2f} giờ ({dep_pct:.1f}%)</span>'
+        f'<span>⏳ Chưa triển khai {pending:.2f} giờ ({pend_pct:.1f}%)</span></div>'
+        f'<div class="track" style="display:flex"><div class="fill" style="width:{dep_pct:.1f}%;background:{RPT_COLORS["green"]};border-radius:8px 0 0 8px"></div>'
+        f'<div class="fill" style="width:{pend_pct:.1f}%;background:{RPT_COLORS["amber"]};border-radius:0 8px 8px 0"></div></div></div>',
+        unsafe_allow_html=True)
+    t_pending, t_deployed = st.tabs([f"⏳ Chưa triển khai — {pending:.2f} giờ ({len(st_['pending_items'])} ticket)",
+                                     f"✅ Đã triển khai — {deployed:.2f} giờ ({len(st_['deployed_items'])} ticket)"])
+    with t_pending:
+        render_agn_hours_list(st_["pending_items"], "Không có giờ nào chưa triển khai.")
+    with t_deployed:
+        render_agn_hours_list(st_["deployed_items"], "Chưa có ticket nào đã triển khai.")
+        gap = deployed - sum(agn_item_hours(i) for i in st_["deployed_items"])
+        if abs(gap) >= 0.005:
+            st.caption(f"Tổng tháng theo file AEGONA lệch {gap:+.2f} giờ so với cộng các dòng — phần lệch tính vào Đã triển khai.")
+
+def build_agn_pdf_bytes(tracking_items):
+    """File PDF báo cáo gói bảo trì AEGONA (nút tải ở trang Báo cáo Ticket / Báo cáo tuần + đính kèm email). None nếu chưa có giờ."""
+    stats = agn_package_stats(tracking_items)
+    if not stats:
+        return None
+    return agn_report_pdf.build_pdf(stats, tracking_items, LOGO_PATH, now_vn(), TRACKING_STATUS_COLORS)
+
+def render_ticket_report_agn():
+    """Gói bảo trì AEGONA: tổng giờ theo tháng, tổng giờ đã thực hiện, % đã dùng gói, ticket đang mở + xuất PDF."""
+    items = db.get_ticket_tracking()
+    st_ = agn_package_stats(items)
+    if not st_:
+        st.info("Chưa có dữ liệu giờ AEGONA — tải file báo cáo AEGONA ở trang 📈 Báo cáo tuần.")
+        return
+    quota, mq = st_["quota"], st_["monthly_quota"]
+    used, used_pct, time_pct, remaining = st_["used"], st_["used_pct"], st_["time_pct"], st_["remaining"]
+
+    h1, h2 = st.columns([4, 1.3])
+    h1.markdown(
+        f"Hợp đồng ký <b>{st_['signed']:%d/%m/%Y}</b> → hết hạn <b>{st_['contract_end']:%d/%m/%Y}</b> · tổng gói <b>{quota:g} giờ</b> "
+        f"({hours_to_md(quota):g} MD) · chia đều <b>{mq} giờ/tháng</b> "
+        f"({month_label(st_['contract_months'][0])} → {month_label(st_['contract_months'][-1])})", unsafe_allow_html=True)
+    with h2:
+        try:
+            pdf_bytes = build_agn_pdf_bytes(items)
+            st.download_button("📄 Xuất báo cáo PDF", pdf_bytes, file_name=f"BaoCao_AEGONA_{st_['today']:%Y%m%d}.pdf",
+                               mime="application/pdf", type="primary", width="stretch")
+        except Exception as e:  # PDF lỗi không được làm hỏng cả trang
+            st.error(f"Không tạo được PDF: {e}")
+
+    pct_color = RPT_COLORS["green"] if used_pct <= time_pct else (RPT_COLORS["amber"] if used_pct <= 100 else RPT_COLORS["red"])
+    per_left = st_["per_month_left"]
+    st.markdown(rpt_cards_html([
+        ("Tổng giờ đã thực hiện", f"{used:.2f} giờ", f"= {hours_to_md(used):g} MD trong gói", RPT_COLORS["navy"]),
+        ("% đã dùng gói", f"{used_pct:.1f}%", f"trên {quota:g} giờ · thời gian đã qua {time_pct:.0f}%", pct_color),
+        ("Giờ còn lại", f"{remaining:.2f} giờ" if remaining >= 0 else f"Vượt {-remaining:.2f} giờ",
+         f"≈ {per_left:.2f} giờ/tháng cho {st_['remaining_months']} tháng còn lại (kể cả tháng này)"
+         if per_left is not None and remaining >= 0 else f"{hours_to_md(max(remaining, 0)):g} MD",
+         RPT_COLORS["teal"] if remaining >= 0 else RPT_COLORS["red"]),
+        (f"Giờ {month_label(st_['this_month'])}", f"{st_['month_used']:.2f} / {mq}",
+         f"{st_['month_used'] / mq * 100:.0f}% hạn mức tháng", RPT_COLORS["red"] if st_["month_used"] > mq else RPT_COLORS["blue"]),
+        ("Bình quân / tháng", f"{st_['avg_month']:.2f} giờ", f"hạn mức {mq} giờ/tháng",
+         RPT_COLORS["red"] if st_["avg_month"] > mq else RPT_COLORS["purple"]),
+    ]), unsafe_allow_html=True)
+    st.markdown(
+        rpt_meter_html("Đã dùng gói bảo trì", used_pct, pct_color, f"{used:.2f} / {quota:g} giờ ({used_pct:.1f}%)")
+        + rpt_meter_html("Thời gian hợp đồng đã qua", time_pct, "#64748B",
+                         f"{st_['elapsed_days']} / {st_['total_days']} ngày ({time_pct:.0f}%)"),
+        unsafe_allow_html=True)
+    if used_pct > time_pct:
+        st.warning(f"Giờ sử dụng ({used_pct:.1f}%) đang nhanh hơn tiến độ thời gian hợp đồng ({time_pct:.0f}%) — "
+                   f"bình quân {st_['avg_month']:.2f} giờ/tháng, hạn mức {mq} giờ/tháng.")
+    if st_["outside"]:
+        st.caption("Có giờ ngoài thời hạn hợp đồng (không tính vào %): " + ", ".join(
+            f"{month_label(m)} {s['actual']:.2f} giờ" for m, s in st_["outside"].items()))
+
+    render_agn_hours_split(st_)
+
+    open_items = st_["open_items"]
+    rpt_section(f"🎫 Ticket AEGONA đang mở ({len(open_items)})")
+    st.markdown(rpt_cards_html(
+        [("Ticket đang mở", len(open_items), f"{st_['closed_count']} ticket đã Đóng / Hủy", RPT_COLORS["navy"])]
+        + [(label, n, " · ".join(statuses) if len(statuses) > 1 else "", color) for label, n, color, statuses in st_["open_groups"]]
+    ), unsafe_allow_html=True)
+    chips = "".join(f'<span class="rpt-chip" style="--c:{TRACKING_STATUS_COLORS.get(s, "#64748B")}">{s} <b>{n}</b></span>'
+                    for s, n in st_["status_counts"].items())
+    st.markdown(f'<div class="rpt-chips">{chips}</div>', unsafe_allow_html=True)
+    if open_items:
+        open_df = pd.DataFrame([{
+            "ID": i.get("ext_id") or "", "Tiêu đề": (i.get("title") or "").splitlines()[0] if i.get("title") else "",
+            "Trạng thái": i.get("status") or "", "Ưu tiên": i.get("priority") or "",
+            "Hệ thống": i.get("system_name") or "", "Ngày yêu cầu": f"{to_date(i.get('requested_at')):%d/%m/%Y}" if to_date(i.get("requested_at")) else "",
+            "Tháng tính giờ": month_label(i["work_month"]) if i.get("work_month") else "",
+            "ETA (giờ)": float(i["eta_hours"]) if i.get("eta_hours") is not None else None,
+        } for i in open_items])
+
+        st.dataframe(open_df.style.map(tracking_status_style, subset=["Trạng thái"]).format({"ETA (giờ)": "{:.2f}"}, na_rep=""),
+                     hide_index=True, width="stretch", height=min(38 + 35 * len(open_df), 460),
+                     column_config={"Tiêu đề": st.column_config.TextColumn(width="large")})
+
+    rpt_section("⏱️ Tổng giờ theo tháng")
+    rows = [{
+        "Tháng": r["label"], "Số ticket": r["count"] if r["has_data"] else None,
+        "ETA (giờ)": r["eta"] if r["has_data"] else None, "Thực hiện (giờ)": r["actual"] if r["has_data"] else None,
+        "Đã triển khai (giờ)": r["deployed"] if r["has_data"] else None,
+        "Chưa triển khai (giờ)": r["pending"] if r["has_data"] else None,
+        "Hạn mức (giờ)": r["quota"], "Chênh lệch (giờ)": r["diff"] if r["has_data"] else None,
+        "Lũy kế (giờ)": r["cum"] if r["has_data"] else None, "% gói (lũy kế)": r["cum_pct"] if r["has_data"] else None,
+    } for r in st_["month_rows"]]
+    rows.append({
+        "Tháng": "TỔNG", "Số ticket": st_["total_count"], "ETA (giờ)": st_["total_eta"], "Thực hiện (giờ)": used,
+        "Đã triển khai (giờ)": st_["deployed"], "Chưa triển khai (giờ)": st_["pending"], "Hạn mức (giờ)": quota, "Chênh lệch (giờ)": st_["total_diff"], "Lũy kế (giờ)": used, "% gói (lũy kế)": used_pct,
+    })
+    df = pd.DataFrame(rows)
+
+    def diff_style(v):
+        if v is None or pd.isna(v):
+            return ""
+        return "color:#B91C1C;font-weight:700;background-color:#FEE2E2" if v > 0 else "color:#047857;font-weight:700"
+
+    styler = (df.style.map(diff_style, subset=["Chênh lệch (giờ)"])
+              .map(lambda v: "color:#047857;font-weight:600", subset=["Đã triển khai (giờ)"])
+              .map(lambda v: "color:#B45309;font-weight:600" if v else "", subset=["Chưa triển khai (giờ)"])
+              .apply(lambda r: ["font-weight:800;background-color:#E0E7FF;color:#1E3A8A"] * len(r) if r["Tháng"] == "TỔNG" else [""] * len(r), axis=1)
+              .format({"Số ticket": "{:.0f}"}, na_rep="")
+              .format({c: "{:.2f}" for c in ["ETA (giờ)", "Thực hiện (giờ)", "Đã triển khai (giờ)", "Chưa triển khai (giờ)", "Hạn mức (giờ)", "Lũy kế (giờ)"]}, na_rep="")
+              .format({"Chênh lệch (giờ)": "{:+.2f}", "% gói (lũy kế)": "{:.1f}%"}, na_rep=""))
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        st.caption("Chênh lệch = Thực hiện − hạn mức tháng (đỏ: vượt, xanh: trong hạn mức). Dòng TỔNG so với hạn mức các tháng đã qua.")
+        st.dataframe(styler, hide_index=True, width="stretch", height=38 + 35 * len(df))
+    with c2:
+        parts = [("Đã triển khai", "deployed"), ("Chưa triển khai", "pending")]
+        chart_df = pd.DataFrame([{"Tháng": r["label"], "Thứ tự": n, "Phần": label, "Thứ tự phần": k, "Giờ": round(r[key], 2)}
+                                 for n, r in enumerate(st_["month_rows"]) for k, (label, key) in enumerate(parts)])
+        totals_df = pd.DataFrame([{"Tháng": r["label"], "Thứ tự": n, "Tổng": round(r["actual"], 2), "Vượt": r["actual"] > mq}
+                                  for n, r in enumerate(st_["month_rows"]) if r["actual"]])
+        x_enc = alt.X("Tháng:N", sort=alt.SortField("Thứ tự"), title=None, axis=alt.Axis(labelAngle=-45))
+        bars = alt.Chart(chart_df).mark_bar().encode(
+            x=x_enc, y=alt.Y("sum(Giờ):Q", title="Giờ"),
+            color=alt.Color("Phần:N", scale=alt.Scale(domain=["Đã triển khai", "Chưa triển khai"], range=["#059669", "#D97706"]),
+                            legend=alt.Legend(orient="bottom", title=None)),
+            order=alt.Order("Thứ tự phần:Q"),
+            tooltip=["Tháng", "Phần", alt.Tooltip("Giờ:Q", format=".2f")],
+        )
+        layers = bars
+        if not totals_df.empty:
+            layers += alt.Chart(totals_df).mark_text(dy=-8, fontWeight="bold").encode(
+                x=x_enc, y="Tổng:Q", text=alt.Text("Tổng:Q", format="g"),
+                color=alt.condition("datum['Vượt']", alt.value("#DC2626"), alt.value("#475569")))
+        layers += alt.Chart(pd.DataFrame({"y": [mq]})).mark_rule(strokeDash=[6, 4], color="#DC2626", size=2).encode(y="y:Q")
+        st.altair_chart(layers.properties(height=360), width="stretch")
+        st.caption(f"Đường nét đứt đỏ = hạn mức {mq} giờ/tháng; số trên cột = tổng giờ tháng (đỏ: vượt hạn mức).")
+
+def render_ticket_report_page():
+    st.markdown(REPORT_CSS, unsafe_allow_html=True)
+    st.markdown('<div class="main-header">📊 Báo cáo Ticket</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="sub-header">Tổng hợp yêu cầu hỗ trợ & gói bảo trì AEGONA · cập nhật {now_vn():%H:%M %d/%m/%Y}</div>',
+                unsafe_allow_html=True)
+    tab_ticket, tab_agn = st.tabs(["🎫 Ticket hỗ trợ", "🔧 Gói bảo trì AEGONA"])
+    with tab_ticket:
+        render_ticket_report_tickets(db_tickets)
+    with tab_agn:
+        render_ticket_report_agn()
+
+# -----------------
+# TỰ ĐỘNG GỬI BÁO CÁO TUẦN
+# -----------------
+# Streamlit Cloud cho app ngủ khi không ai truy cập nên không thể chạy scheduler nền.
+# Thay vào đó kiểm tra mỗi lần có người mở app: quá giờ hẹn và tuần này chưa gửi thì gửi.
+# Đặt sau phần định nghĩa hàm vì email đính kèm PDF AEGONA (agn_package_stats... định nghĩa ở dưới).
+app_settings = db.get_settings()
+if weekly_email_due(app_settings):
+    # Ghi mốc thử TRƯỚC khi gửi để nếu thất bại thì cooldown có hiệu lực ngay,
+    # tránh mọi lượt truy cập sau đó đều phải chờ timeout SMTP.
+    db.save_settings({"report_email_last_attempt_at": now_vn().isoformat()})
+    ok, msg = send_weekly_report_email(app_settings, db_tickets, db_tasks)
+    if ok:
+        st.toast(f"📧 {msg}")
+    else:
+        print(f"[Gửi báo cáo tuần tự động] Thất bại: {msg}")
+
 if page == "🏠 Trang chủ":
     st.markdown(f'<div class="main-header">Welcome to {Config.APP_NAME}</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">Dashboard Tổng quát</div>', unsafe_allow_html=True)
@@ -2748,7 +3679,7 @@ elif page == "📈 Báo cáo tuần của Nam":
     st.subheader("📝 Ghi chú công việc ngoài ticket")
     st.caption(
         "Ghi tổng quan việc đã làm/đang follow — mỗi dòng sẽ thành '- nội dung' trong mục 'Công việc khác' "
-        "của đúng dòng ERP / Bảo hành / Gree App / IT cơ bản trong file mẫu. Ghi nhanh hằng ngày ở sidebar, "
+        "của nhóm ERP / Bảo hành / Gree App / IT cơ bản ở dòng 'Công việc đã thực hiện' của file mẫu. Ghi nhanh hằng ngày ở sidebar, "
         "hoặc thêm/sửa/xóa trực tiếp trong bảng dưới rồi bấm Lưu."
     )
     render_work_notes_list(base_ctx["week_notes"])
@@ -2759,9 +3690,9 @@ elif page == "📈 Báo cáo tuần của Nam":
     st.divider()
     st.subheader("🎯 Theo dõi ticket (AEGONA...)")
     st.caption(
-        "Danh sách ticket bên ngoài cần follow theo trạng thái. Sửa trực tiếp trong bảng (đổi trạng thái, ưu tiên, "
-        "ngày lên Production...) rồi bấm Lưu. Báo cáo tuần ghi mục **Theo dõi ticket** vào đúng dòng Nhóm: các mục còn mở "
-        "+ mục đổi trạng thái trong tuần, dạng `dd/mm: #ID – Tiêu đề – Trạng thái`."
+        "Ticket AEGONA cần follow + giờ/MD đã dùng theo tháng. Đổi trạng thái bằng dropdown trong bảng rồi bấm **Lưu**; "
+        "giờ theo tháng lấy từ file báo cáo AEGONA (mục 📥 bên dưới). Báo cáo tuần ghi mục **Theo dõi ticket**: các mục "
+        "còn mở + mục đổi trạng thái trong tuần, dạng `dd/mm: #ID – Tiêu đề – Trạng thái`."
     )
     render_ticket_tracking_editor(tracking_items, tracking_logs, start_date, end_date)
     st.download_button(
@@ -2774,6 +3705,27 @@ elif page == "📈 Báo cáo tuần của Nam":
     render_tracking_import_box(tracking_items)
     issues = st.text_area("Vấn đề gặp phải / Rủi ro cần lưu ý", placeholder="Nhập các vấn đề nếu có...")
 
+    with st.expander("👀 Xem trước nội dung báo cáo theo mẫu"):
+        preview = build_weekly_sections(dict(base_ctx, issues=issues))
+        for title, key in (("I.1. Tóm tắt chung", "summary"), ("I.2. Công việc đã thực hiện trong tuần", "done"),
+                           ("I.3. Công việc đang tiến hành / dở dang", "doing")):
+            st.markdown(f"##### {title}")
+            st.markdown(report_lines_markdown(preview[key]) if preview[key] else "_(Không có)_")
+        st.markdown("##### II. Các công việc đã nêu tuần trước nhưng chưa được giải quyết")
+        if preview["carried"]:
+            st.dataframe(pd.DataFrame(preview["carried"]).rename(columns={
+                "content": "Nội dung", "status": "Tình trạng hiện tại", "reason": "Nguyên nhân chưa giải quyết",
+                "next": "Hướng xử lý tiếp theo & dự kiến hoàn thành"}), hide_index=True, width="stretch")
+        else:
+            st.markdown("_(Không có)_")
+        st.markdown(f"##### III. Kế hoạch công việc tuần sau ({preview['next_week_text']})")
+        if preview["plan"]:
+            st.dataframe(pd.DataFrame(preview["plan"]).rename(columns={
+                "content": "Nội dung công việc", "goal": "Mục tiêu / Kết quả kỳ vọng", "require": "Yêu cầu kết quả đạt được"}),
+                hide_index=True, width="stretch")
+        else:
+            st.markdown("_(Giữ nguyên bảng trống của file mẫu)_")
+
     st.divider()
     if not DOCX_AVAILABLE:
         st.error("Chưa cài thư viện `python-docx`. Vui lòng chạy `pip install python-docx` rồi khởi động lại app để dùng tính năng xuất Word.")
@@ -2783,7 +3735,8 @@ elif page == "📈 Báo cáo tuần của Nam":
 
         exp_col1, exp_col2 = st.columns(2)
         with exp_col1:
-            st.caption("Dùng đúng file mẫu công ty (logo, song ngữ, khung tự đánh giá...) — chỉ đổ dữ liệu vào mục Hệ thống Bảo hành.")
+            st.caption("Dùng đúng file mẫu công ty (logo, khung tự đánh giá...) — điền mục I (tóm tắt / đã làm / dở dang), "
+                       "II (tuần trước chưa giải quyết) và III (kế hoạch tuần sau).")
             if st.button("📄 Xuất theo Mẫu Công ty (.docx)", type="primary", use_container_width=True):
                 if not os.path.exists(TEMPLATE_PATH):
                     st.error(
@@ -2808,6 +3761,17 @@ elif page == "📈 Báo cáo tuần của Nam":
                 st.session_state["weekly_report_filename"] = f"BaoCao_Tuan{report_week}_Thang{report_month}_{report_year}_TongQuat.docx"
                 st.success("Đã tạo file báo cáo. Bấm nút bên dưới để tải về.")
 
+        try:
+            agn_pdf = build_agn_pdf_bytes(tracking_items)
+        except Exception as e:
+            agn_pdf = None
+            st.error(f"Không tạo được PDF AEGONA: {e}")
+        if agn_pdf:
+            st.download_button(
+                "📄 Tải PDF báo cáo AEGONA (gửi kèm email)", data=agn_pdf,
+                file_name=f"NAMLE - BAO CAO AEGONA - TUAN {report_week:02d} THANG {report_month:02d}.pdf",
+                mime="application/pdf", use_container_width=True, key="btn_weekly_agn_pdf",
+            )
         if st.session_state.get("weekly_report_buffer"):
             st.download_button(
                 "⬇️ Tải file báo cáo Word",
@@ -2816,6 +3780,12 @@ elif page == "📈 Báo cáo tuần của Nam":
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 use_container_width=True,
             )
+
+elif page == "📊 Báo cáo Ticket":
+    if not is_admin():
+        st.warning("🔐 Chức năng này chỉ dành cho Admin. Vui lòng đăng nhập ở sidebar.")
+        st.stop()
+    render_ticket_report_page()
 
 elif page == "⚙️ Cài đặt":
     if not is_admin():

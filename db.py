@@ -208,7 +208,12 @@ def init_db():
         )
         """)
     # Cột lấy từ file Excel log cập nhật hệ thống Gree App (tracking_import.py)
-    for col, col_type in (("content", "TEXT"), ("source_code", "VARCHAR(100)"), ("assignee", "VARCHAR(100)")):
+    # + cột lấy từ file "Gree VN x AGN_Maintenance Ticket Report" (giờ ETA/thực tế theo tháng → tính MD)
+    for col, col_type in (("content", "TEXT"), ("source_code", "VARCHAR(100)"), ("assignee", "VARCHAR(100)"),
+                          ("system_name", "VARCHAR(50)"), ("module", "VARCHAR(255)"), ("work_month", "VARCHAR(7)"),
+                          ("eta_hours", "DECIMAL(8,2)"), ("actual_hours", "DECIMAL(8,2)"), ("requested_at", "DATE"),
+                          ("start_date", "DATE"), ("end_date", "DATE"), ("agn_status", "VARCHAR(50)"),
+                          ("agn_approve", "VARCHAR(30)"), ("agn_comment", "TEXT")):
         cursor.execute(f"SHOW COLUMNS FROM ticket_tracking LIKE '{col}'")
         if not cursor.fetchall():
             cursor.execute(f"ALTER TABLE ticket_tracking ADD COLUMN {col} {col_type} NULL")
@@ -609,24 +614,38 @@ def get_ticket_tracking_logs():
     return logs
 
 TRACKING_FIELDS = ("ext_id", "title", "status", "priority", "category", "prod_date", "note",
-                   "content", "source_code", "assignee")
+                   "content", "source_code", "assignee",
+                   "system_name", "module", "work_month", "eta_hours", "actual_hours", "requested_at",
+                   "start_date", "end_date", "agn_status", "agn_approve", "agn_comment")
 
 def save_ticket_tracking_changes(added, updated, deleted_ids):
     """added/updated: list dict theo TRACKING_FIELDS (updated có thêm id; chỉ cập nhật các trường có trong dict).
-    Đổi trạng thái → ghi status_changed_at + 1 dòng ticket_tracking_logs (để báo cáo tuần biết đổi lúc nào)."""
+    Đổi trạng thái → ghi status_changed_at + 1 dòng ticket_tracking_logs (để báo cáo tuần biết đổi lúc nào).
+    Key tùy chọn 'changed_at' (date/datetime): ngày thật của lần thêm/đổi trạng thái — dùng khi nạp dữ liệu cũ
+    từ file để mục đã đóng từ tháng trước không bị tính vào báo cáo tuần hiện tại."""
     conn = get_connection()
     if not conn: return False
     cursor = conn.cursor(dictionary=True)
     now = _now_vn_naive()
+
+    def event_time(item):
+        at = item.get("changed_at")
+        if isinstance(at, datetime.datetime):
+            return at
+        if isinstance(at, datetime.date):
+            return datetime.datetime.combine(at, datetime.time(12, 0))
+        return now
+
     for item in added:
+        at = event_time(item)
         cursor.execute(
             f"INSERT INTO ticket_tracking ({', '.join(TRACKING_FIELDS)}, status_changed_at, created_at) "
             f"VALUES ({', '.join(['%s'] * (len(TRACKING_FIELDS) + 2))})",
-            tuple(item.get(f) for f in TRACKING_FIELDS) + (now, now)
+            tuple(item.get(f) for f in TRACKING_FIELDS) + (at, at)
         )
         cursor.execute(
             "INSERT INTO ticket_tracking_logs (tracking_id, old_status, new_status, created_at) VALUES (%s, NULL, %s, %s)",
-            (cursor.lastrowid, item["status"], now)
+            (cursor.lastrowid, item["status"], at)
         )
     for item in updated:
         cursor.execute("SELECT status FROM ticket_tracking WHERE id = %s", (item["id"],))
@@ -639,10 +658,11 @@ def save_ticket_tracking_changes(added, updated, deleted_ids):
             tuple(item[f] for f in fields) + (item["id"],)
         )
         if "status" in item and row["status"] != item["status"]:
-            cursor.execute("UPDATE ticket_tracking SET status_changed_at = %s WHERE id = %s", (now, item["id"]))
+            at = event_time(item)
+            cursor.execute("UPDATE ticket_tracking SET status_changed_at = %s WHERE id = %s", (at, item["id"]))
             cursor.execute(
                 "INSERT INTO ticket_tracking_logs (tracking_id, old_status, new_status, created_at) VALUES (%s, %s, %s, %s)",
-                (item["id"], row["status"], item["status"], now)
+                (item["id"], row["status"], item["status"], at)
             )
     for item_id in deleted_ids:
         cursor.execute("DELETE FROM ticket_tracking_logs WHERE tracking_id = %s", (item_id,))
